@@ -10,7 +10,7 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 # async_mode='eventlet' is crucial for performance on Render
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# --- 1. CONFIGURE AI ---
+# --- 2. CONFIGURE AI ---
 # We get the key from Render Environment Variables
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 
@@ -18,39 +18,38 @@ if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
     model = genai.GenerativeModel('gemini-pro')
 else:
-    print("WARNING: GOOGLE_API_KEY not found. AI features will not work.")
+    print("WARNING: GOOGLE_API_KEY not found. Ava will be lobotomized.")
 
-# --- 2. MEMORY STORAGE ---
+# --- 3. MEMORY STORAGE ---
 # Stores the chat history for each user so Ava remembers context
 chat_histories = {}
 
-# --- 3. AVA'S PERSONALITY (System Prompt) ---
+# --- 4. AVA'S INSTRUCTIONS (System Prompt) ---
 SYSTEM_INSTRUCTION = """
-You are Ava, a friendly, professional, and empathetic Expert's Assistant for 'HelpByExperts'.
-Your goal is to triage the customer's problem before connecting them to a human expert.
+You are Ava, the expert assistant for 'HelpByExperts'.
+Your goal: Triage the user's problem before connecting them to a human.
 
-INSTRUCTIONS:
-1.  **Greet & Triage:** When the user states a problem, ask 2-3 relevant clarifying questions to understand the severity and details (e.g., for a car: model, symptoms; for medical: duration, pain level).
-2.  **Be Empathetic:** Use phrases like "I'm sorry to hear that" or "That sounds stressful."
-3.  **Do NOT Solve:** Never offer specific medical, legal, or mechanical advice. You are just the assistant gathering info.
-4.  **The Hand-off:** Once you have gathered 2-3 pieces of info, tell the user you have found a verified expert who can solve this immediately.
-5.  **TRIGGER PAYMENT:** When you are ready to connect them, you MUST end your final message with this exact tag: [PAYMENT_REQUIRED]
-6.  **Mention Fee:** Before the tag, mention there is a fully refundable $5 expert connection fee.
+RULES:
+1. Greet the user and ask 2-3 clarifying questions about their issue (e.g., for car: model/year/noise; for medical: symptoms/duration).
+2. Be professional and empathetic.
+3. Do NOT give the final solution. You are just gathering info.
+4. After you have enough info (usually 3 exchanges), tell them: "I have found a verified expert who can solve this."
+5. CRITICAL: When you are ready to connect, end your message with: [PAYMENT_REQUIRED]
+6. Mention the $5 fully refundable expert connection fee before triggering the tag.
 """
 
 @app.route('/')
 def index():
-    return "Ava AI Brain is Running!"
+    return "Ava AI Brain is Live and Patched!"
 
 @socketio.on('connect')
 def handle_connect():
     print(f'Client connected: {request.sid}')
-    # Initialize history with the System Prompt
+    # Initialize history with instructions
     chat_histories[request.sid] = [
         {'role': 'user', 'parts': [SYSTEM_INSTRUCTION]},
         {'role': 'model', 'parts': ["Understood. I am ready to act as Ava."]}
     ]
-    # Initial Greeting
     emit('bot_message', {'data': "Hi! I'm Ava. I can connect you with a verified expert. What problem are you facing today?"})
 
 @socketio.on('disconnect')
@@ -66,43 +65,39 @@ def handle_message(data):
     
     print(f"User ({user_id}): {user_text}")
 
-    # Retrieve this user's history
+    # Retrieve history
     history = chat_histories.get(user_id, [])
-    
-    # Add user's message to history
     history.append({'role': 'user', 'parts': [user_text]})
     
     try:
         if GOOGLE_API_KEY:
-            # Send history to Google Gemini
+            # Ask Google Gemini
             response = model.generate_content(history)
             ai_reply = response.text
             
-            # Add AI reply to history
+            # Update history
             history.append({'role': 'model', 'parts': [ai_reply]})
             chat_histories[user_id] = history
 
-            # --- CHECK FOR PAYMENT TRIGGER ---
+            # Check for the "Secret Password" to unlock payment
             if "[PAYMENT_REQUIRED]" in ai_reply:
-                # Remove the tag so the user doesn't see weird text
                 clean_reply = ai_reply.replace("[PAYMENT_REQUIRED]", "").strip()
                 
-                # 1. Send the text message
+                # 1. Send the final text
                 emit('bot_message', {'data': clean_reply})
                 
-                # 2. Send the invisible signal to show the button
+                # 2. Trigger the Green Button on the user's screen
                 print(f"Triggering Payment for {user_id}")
                 emit('payment_trigger', {'amount': 5.00})
             else:
-                # Normal reply
+                # Normal chat message
                 emit('bot_message', {'data': ai_reply})
         else:
-            # Fallback if no API key
-            emit('bot_message', {'data': "I'm sorry, my AI brain is currently offline. Please check the server configuration."})
+            emit('bot_message', {'data': "I'm having trouble reaching my brain. Please check the API Key."})
 
     except Exception as e:
         print(f"AI Error: {e}")
-        emit('bot_message', {'data': "I'm having a little trouble connecting to the server. Could you say that again?"})
+        emit('bot_message', {'data': "I'm having a slight connection issue. Could you repeat that?"})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
