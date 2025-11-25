@@ -2,11 +2,12 @@ import os
 from flask import Flask, request
 from flask_socketio import SocketIO, emit
 
+# THIS LINE IS CRITICAL - It defines 'app' for Gunicorn
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 
-# CORS * allows your website to connect from anywhere
-socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True)
+# Enable CORS so your website can connect
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 @app.route('/')
 def index():
@@ -15,32 +16,23 @@ def index():
 @socketio.on('connect')
 def handle_connect():
     print(f'Client connected: {request.sid}')
-    # UPDATED: Greeting from Ava
-    emit('bot_message', {'data': 'Hi there! I\'m Ava. I can connect you with a verified expert. What do you need help with today?'})
+    emit('bot_message', {'data': 'Hi! I\'m Ava. How can I help you find an expert today?'})
 
 @socketio.on('user_message')
 def handle_message(data):
     user_text = data.get('message', '')
     user_id = data.get('user_id', 'unknown')
-    
     print(f"Message from {user_id}: {user_text}")
-
-    # --- AVA'S LOGIC ---
-    response = f"Thanks. I've received: '{user_text}'. Let me find the right expert for you..."
     
-    # Simple keyword routing
+    # Ava's Logic
+    response = f"I've received your message: '{user_text}'. Checking for experts..."
     if "dog" in user_text.lower() or "cat" in user_text.lower():
-        response = "I see this is a pet issue. I'm paging a Veterinarian now. Please hold."
+        response = "I see this is a pet issue. Paging a Veterinarian..."
     elif "car" in user_text.lower() or "engine" in user_text.lower():
-        response = "Got it. Connecting you with a certified Mechanic..."
-    elif "legal" in user_text.lower() or "sue" in user_text.lower():
-        response = "I understand. I am connecting you with a Lawyer for advice."
-
+        response = "Connecting you with a certified Mechanic..."
+        
     emit('bot_message', {'data': response})
 
 if __name__ == '__main__':
-    # Use 0.0.0.0 to allow external connections
-    # We use port 8080 as it's commonly open
-    port = int(os.environ.get("PORT", 8080))
-    print(f"Ava is starting on 0.0.0.0:{port}...")
+    port = int(os.environ.get("PORT", 10000))
     socketio.run(app, host='0.0.0.0', port=port)
