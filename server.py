@@ -11,17 +11,16 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- 2. CONFIGURE AI ---
-# We get the key from Render Environment Variables
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel('gemini-pro')
+    # UPDATED: Use 'gemini-1.5-flash' to fix the 404 error
+    model = genai.GenerativeModel('gemini-1.5-flash')
 else:
     print("WARNING: GOOGLE_API_KEY not found. Ava will be lobotomized.")
 
 # --- 3. MEMORY STORAGE ---
-# Stores the chat history for each user so Ava remembers context
 chat_histories = {}
 
 # --- 4. AVA'S INSTRUCTIONS (System Prompt) ---
@@ -40,7 +39,7 @@ RULES:
 
 @app.route('/')
 def index():
-    return "Ava AI Brain is Live and Patched!"
+    return "Ava AI Brain is Live (Gemini Flash Version)!"
 
 @socketio.on('connect')
 def handle_connect():
