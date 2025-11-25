@@ -7,22 +7,19 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 
 # Enable CORS so your website (and cPanel) can connect
-# async_mode='eventlet' is crucial for performance on Render
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- 2. CONFIGURE AI ---
-# We get the key from Render Environment Variables
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
-    # UPDATED: Use 'gemini-1.5-flash' to fix the 404 error
+    # Using gemini-1.5-flash which is the current standard
     model = genai.GenerativeModel('gemini-1.5-flash')
 else:
     print("WARNING: GOOGLE_API_KEY not found. Ava will be lobotomized.")
 
 # --- 3. MEMORY STORAGE ---
-# Stores the chat history for each user so Ava remembers context
 chat_histories = {}
 
 # --- 4. AVA'S INSTRUCTIONS (System Prompt) ---
@@ -41,12 +38,11 @@ RULES:
 
 @app.route('/')
 def index():
-    return "Ava AI Brain is Live (Flash Model)!"
+    return "Ava AI Brain is Live (Debug Mode)!"
 
 @socketio.on('connect')
 def handle_connect():
     print(f'Client connected: {request.sid}')
-    # Initialize history with instructions
     chat_histories[request.sid] = [
         {'role': 'user', 'parts': [SYSTEM_INSTRUCTION]},
         {'role': 'model', 'parts': ["Understood. I am ready to act as Ava."]}
@@ -66,39 +62,32 @@ def handle_message(data):
     
     print(f"User ({user_id}): {user_text}")
 
-    # Retrieve history
     history = chat_histories.get(user_id, [])
     history.append({'role': 'user', 'parts': [user_text]})
     
     try:
         if GOOGLE_API_KEY:
-            # Ask Google Gemini
             response = model.generate_content(history)
             ai_reply = response.text
             
-            # Update history
             history.append({'role': 'model', 'parts': [ai_reply]})
             chat_histories[user_id] = history
 
-            # Check for the "Secret Password" to unlock payment
             if "[PAYMENT_REQUIRED]" in ai_reply:
                 clean_reply = ai_reply.replace("[PAYMENT_REQUIRED]", "").strip()
-                
-                # 1. Send the final text
                 emit('bot_message', {'data': clean_reply})
-                
-                # 2. Trigger the Green Button on the user's screen
                 print(f"Triggering Payment for {user_id}")
                 emit('payment_trigger', {'amount': 5.00})
             else:
-                # Normal chat message
                 emit('bot_message', {'data': ai_reply})
         else:
-            emit('bot_message', {'data': "I'm having trouble reaching my brain. Please check the API Key."})
+            emit('bot_message', {'data': "⚠️ Error: GOOGLE_API_KEY not found in Render Environment Variables."})
 
     except Exception as e:
         print(f"AI Error: {e}")
-        emit('bot_message', {'data': "I'm having a slight connection issue. Could you repeat that?"})
+        # DEBUG: Send the actual error to the frontend so the user can see it
+        error_msg = f"⚠️ System Error: {str(e)}"
+        emit('bot_message', {'data': error_msg})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
