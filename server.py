@@ -7,51 +7,57 @@ from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
 app = Flask(__name__)
-# Load secret from environment; falls back to 'secret!' if not set
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 
 # --- ENABLE CORS ---
-# This allows the frontend to make requests to the payment route
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- STRIPE CONFIGURATION ---
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 
 if not stripe.api_key:
-    print("WARNING: STRIPE_SECRET_KEY not found. Payments will fail.")
+    print("WARNING: STRIPE_SECRET_KEY not found.")
 
-# --- SOCKET IO (Using Gevent) ---
-# Changed async_mode to 'gevent' for stability with Stripe
+# --- SOCKET IO ---
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
-# --- ROBUST AI CONFIGURATION ---
+# --- GLOBALS ---
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
-model = None
+active_model = None  # Will be loaded on first request
+chat_histories = {}
 
-def configure_robust_ai():
+# --- AI LOADING LOGIC ---
+def get_ai_model():
+    global active_model
+    if active_model:
+        return active_model
+    
     if not GOOGLE_API_KEY:
-        print("FATAL: GOOGLE_API_KEY not found.")
         return None
 
-    genai.configure(api_key=GOOGLE_API_KEY)
-    
-    # Priority list of stable models
-    candidates = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-1.5-pro', 'gemini-pro']
-    
-    for name in candidates:
-        try:
-            if 'preview' in name or 'exp' in name: continue
-            print(f"Testing AI Model: {name}...")
-            temp_model = genai.GenerativeModel(name)
-            temp_model.generate_content("Test")
-            print(f"SUCCESS: Connected to {name}")
-            return temp_model
-        except Exception as e:
-            print(f"Failed {name}: {e}")
+    try:
+        genai.configure(api_key=GOOGLE_API_KEY)
+        # Try the most stable model first
+        candidates = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-1.5-pro', 'gemini-pro']
+        
+        for name in candidates:
+            try:
+                print(f"Attempting to load AI model: {name}")
+                temp_model = genai.GenerativeModel(name)
+                # Quick test
+                temp_model.generate_content("Hello")
+                print(f"SUCCESS: AI Model {name} loaded.")
+                active_model = temp_model
+                return active_model
+            except Exception as inner_e:
+                print(f"Failed to load {name}: {inner_e}")
+                continue
+                
+    except Exception as e:
+        print(f"Fatal AI Config Error: {e}")
+        return None
+        
     return None
-
-model = configure_robust_ai()
-chat_histories = {}
 
 # --- AVA'S INSTRUCTIONS ---
 SYSTEM_INSTRUCTION = """
@@ -70,26 +76,21 @@ RULES:
 
 @app.route('/')
 def index():
-    return "Ava Server (Gevent Edition) is Running!"
+    return "Ava Server (Gevent/LazyLoad) is Running!"
 
-# --- PAYMENT ROUTE ---
 @app.route('/create-payment-intent', methods=['POST'])
 def create_payment():
     print("Payment Intent Requested")
     if not stripe.api_key:
         return jsonify({'error': 'Server Error: Stripe Key Missing'}), 500
-        
     try:
-        # Create a PaymentIntent with the order amount and currency
         intent = stripe.PaymentIntent.create(
-            amount=500, # $5.00 in cents
+            amount=500,
             currency='usd',
             automatic_payment_methods={'enabled': True},
         )
-        print(f"Intent Created: {intent.id}")
         return jsonify({'clientSecret': intent.client_secret})
     except Exception as e:
-        print(f"Stripe Error: {str(e)}")
         return jsonify({'error': str(e)}), 403
 
 @socketio.on('connect')
@@ -111,33 +112,39 @@ def handle_message(data):
     user_text = data.get('message', '').strip()
     user_id = request.sid
     
-    # Typing Indicator
     emit('bot_typing', {'status': 'true'})
     time.sleep(3)
     
     history = chat_histories.get(user_id, [])
     history.append({'role': 'user', 'parts': [user_text]})
     
-    try:
-        if model:
-            response = model.generate_content(history)
-            ai_reply = response.text
-            
-            history.append({'role': 'model', 'parts': [ai_reply]})
-            chat_histories[user_id] = history
+    # Try to get the AI model (Lazy Load)
+    model_instance = get_ai_model()
+    
+    if not model_instance:
+        # DEBUG MODE: Tell the user exactly why it failed
+        error_reason = "API Key Missing" if not GOOGLE_API_KEY else "Connection Refused to Google"
+        emit('bot_message', {'data': f"⚠️ System Error: AI Brain Offline ({error_reason}). Check Render Logs."})
+        return
 
-            if "[PAYMENT_REQUIRED]" in ai_reply:
-                clean_reply = ai_reply.replace("[PAYMENT_REQUIRED]", "").strip()
-                emit('bot_message', {'data': clean_reply})
-                emit('payment_trigger', {'amount': 5.00})
-            else:
-                emit('bot_message', {'data': ai_reply})
+    try:
+        response = model_instance.generate_content(history)
+        ai_reply = response.text
+        
+        history.append({'role': 'model', 'parts': [ai_reply]})
+        chat_histories[user_id] = history
+
+        if "[PAYMENT_REQUIRED]" in ai_reply:
+            clean_reply = ai_reply.replace("[PAYMENT_REQUIRED]", "").strip()
+            emit('bot_message', {'data': clean_reply})
+            emit('payment_trigger', {'amount': 5.00})
         else:
-            emit('bot_message', {'data': "System Error: AI Brain Offline."})
+            emit('bot_message', {'data': ai_reply})
 
     except Exception as e:
-        print(f"AI Error: {e}")
-        emit('bot_message', {'data': "I'm having a slight connection issue. Could you repeat that?"})
+        print(f"AI Execution Error: {e}")
+        # Send exact error to chat for debugging
+        emit('bot_message', {'data': f"⚠️ AI Error: {str(e)}"})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
