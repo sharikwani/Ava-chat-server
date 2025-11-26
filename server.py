@@ -4,18 +4,19 @@ import stripe
 import google.generativeai as genai
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
+from flask_cors import CORS
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 
+# --- ENABLE CORS FOR HTTP ROUTES ---
+# This fixes the "Payment Form Not Loading" issue
+CORS(app, resources={r"/*": {"origins": "*"}})
+
 # --- STRIPE CONFIGURATION ---
-# Securely load the key from Environment Variables
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 
-if not stripe.api_key:
-    print("WARNING: STRIPE_SECRET_KEY not found. Payments will fail.")
-
-# Enable CORS
+# Enable SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- ROBUST AI CONFIGURATION ---
@@ -23,16 +24,12 @@ GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 model = None
 
 def configure_robust_ai():
-    """
-    Finds a working model while avoiding 'preview' models that cause 429 errors.
-    """
     if not GOOGLE_API_KEY:
         print("FATAL: GOOGLE_API_KEY not found.")
         return None
 
     genai.configure(api_key=GOOGLE_API_KEY)
     
-    # Priority list of stable models
     candidates = [
         'gemini-1.5-flash',
         'gemini-1.5-flash-001',
@@ -41,7 +38,6 @@ def configure_robust_ai():
         'gemini-1.0-pro'
     ]
     
-    # Query available models but filter out unstable ones
     try:
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
@@ -52,9 +48,6 @@ def configure_robust_ai():
     except Exception as e:
         print(f"Warning: Could not list models: {e}")
 
-    print(f"Testing models: {candidates}")
-
-    # Test each candidate
     for name in candidates:
         try:
             print(f"Testing: {name}...")
@@ -71,7 +64,7 @@ def configure_robust_ai():
 model = configure_robust_ai()
 chat_histories = {}
 
-# --- AVA'S STRICT INSTRUCTIONS ---
+# --- AVA'S INSTRUCTIONS ---
 SYSTEM_INSTRUCTION = """
 You are Ava, the senior triage assistant for 'HelpByExperts'.
 Your goal is to gather a COMPLETE case history before finding an expert.
@@ -97,12 +90,13 @@ def create_payment():
     try:
         # Create a PaymentIntent with the order amount and currency
         intent = stripe.PaymentIntent.create(
-            amount=500, # $5.00 in cents
+            amount=500, # $5.00
             currency='usd',
             automatic_payment_methods={'enabled': True},
         )
         return jsonify({'clientSecret': intent.client_secret})
     except Exception as e:
+        print(f"Stripe Error: {str(e)}")
         return jsonify({'error': str(e)}), 403
 
 @socketio.on('connect')
@@ -110,7 +104,7 @@ def handle_connect():
     print(f'Client connected: {request.sid}')
     chat_histories[request.sid] = [
         {'role': 'user', 'parts': [SYSTEM_INSTRUCTION]},
-        {'role': 'model', 'parts': ["Understood. I will ask 5 questions one by one."]}
+        {'role': 'model', 'parts': ["Understood. I will ask 5 questions."]}
     ]
     emit('bot_message', {'data': "Hi! I'm Ava. I can connect you with a verified expert. What problem are you facing today?"})
 
@@ -124,10 +118,7 @@ def handle_message(data):
     user_text = data.get('message', '').strip()
     user_id = request.sid
     
-    # 1. Show Typing Indicator
     emit('bot_typing', {'status': 'true'})
-    
-    # 2. Realistic Delay (3 seconds)
     time.sleep(3)
     
     history = chat_histories.get(user_id, [])
