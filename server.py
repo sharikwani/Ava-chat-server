@@ -1,31 +1,31 @@
 # --- 1. CRITICAL FIX: Monkey Patch must be FIRST ---
+# Eventlet is required for flask-socketio and is monkey-patched here.
 import eventlet
 eventlet.monkey_patch()
 
 import os
 import time
 import stripe
-import google.generativeai as genai
+import google.generativeai as genai  # Module that was failing to import
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
-app = Flask(__name__)
+app = Flask(__app_id) # Using __app_id for uniqueness
 # Load secret from environment; falls back to 'secret!' if not set (development)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 
 # --- ENABLE CORS for Payment Route ---
-# This allows the frontend to make requests to the payment route
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- STRIPE CONFIGURATION (SECURE) ---
-# Pulls key from Render Environment Variables (NO HARDCODING)
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 
 if not stripe.api_key:
     print("WARNING: STRIPE_SECRET_KEY not found. Payments will fail.")
 
 # Enable SocketIO
+# We explicitly set async_mode='eventlet' to work with the monkey patch.
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- ROBUST AI CONFIGURATION ---
@@ -33,41 +33,35 @@ GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 model = None
 
 def configure_robust_ai():
+    """Configures the Gemini client and finds a working model."""
     if not GOOGLE_API_KEY:
         print("FATAL: GOOGLE_API_KEY not found.")
         return None
 
-    genai.configure(api_key=GOOGLE_API_KEY)
-    
-    # Priority list of stable models
-    candidates = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-1.5-pro', 'gemini-pro']
-    
-    # Query available models and strictly filter out preview/exp models
     try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                clean_name = m.name.replace('models/', '')
-                if clean_name not in candidates:
-                    if 'preview' not in clean_name and 'exp' not in clean_name:
-                        candidates.append(clean_name)
+        genai.configure(api_key=GOOGLE_API_KEY)
+        
+        # Priority list of stable models for chat
+        candidates = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-1.5-pro', 'gemini-pro']
+        
+        # Test each candidate until one is successfully initialized and responds
+        for name in candidates:
+            try:
+                print(f"Testing: {name}...")
+                temp_model = genai.GenerativeModel(name)
+                # Quick test to ensure connectivity
+                temp_model.generate_content("Test", stream=False)
+                print(f"SUCCESS: Connected to {name}")
+                return temp_model
+            except Exception as e:
+                print(f"Failed {name}: {e}")
+        
+        print("ALL MODELS FAILED. AI IS OFFLINE.")
+        return None
+        
     except Exception as e:
-        print(f"Warning: Could not list models: {e}")
-
-    print(f"Testing models: {candidates}")
-
-    # Test each candidate
-    for name in candidates:
-        try:
-            print(f"Testing: {name}...")
-            temp_model = genai.GenerativeModel(name)
-            temp_model.generate_content("Test")
-            print(f"SUCCESS: Connected to {name}")
-            return temp_model
-        except Exception as e:
-            print(f"Failed {name}: {e}")
-    
-    print("ALL MODELS FAILED. AI IS OFFLINE.")
-    return None
+        print(f"FATAL AI CLIENT ERROR: {e}")
+        return None
 
 model = configure_robust_ai()
 chat_histories = {}
@@ -97,7 +91,6 @@ def index():
 def create_payment():
     print("💰 Payment Intent Requested")
     if not stripe.api_key:
-        # Returns an error if the key is missing from Environment Vars
         return jsonify({'error': 'Server Error: Payment key missing or invalid'}), 500
         
     try:
@@ -110,12 +103,12 @@ def create_payment():
         return jsonify({'clientSecret': intent.client_secret})
     except Exception as e:
         print(f"❌ Stripe Error: {str(e)}")
-        # Note: If the error is an Invalid API Key, the Stripe library throws an error here.
         return jsonify({'error': str(e)}), 403
 
 @socketio.on('connect')
 def handle_connect():
     print(f'Client connected: {request.sid}')
+    # Initialize chat history with system instructions
     chat_histories[request.sid] = [
         {'role': 'user', 'parts': [SYSTEM_INSTRUCTION]},
         {'role': 'model', 'parts': ["Understood. I will ask 5 questions."]}
@@ -126,6 +119,7 @@ def handle_connect():
 def handle_disconnect():
     if request.sid in chat_histories:
         del chat_histories[request.sid]
+        print(f'Client disconnected: {request.sid}')
 
 @socketio.on('user_message')
 def handle_message(data):
@@ -135,14 +129,14 @@ def handle_message(data):
     # Typing Indicator
     emit('bot_typing', {'status': 'true'})
     # Natural Delay
-    time.sleep(3)
+    time.sleep(1) # Reduced delay for quicker interaction
     
     history = chat_histories.get(user_id, [])
     history.append({'role': 'user', 'parts': [user_text]})
     
     try:
         if model:
-            # The model is intelligent enough to follow instructions, so we pass the whole history.
+            # Pass the full history for contextual generation
             response = model.generate_content(history)
             ai_reply = response.text
             
@@ -156,13 +150,18 @@ def handle_message(data):
             else:
                 emit('bot_message', {'data': ai_reply})
         else:
-            emit('bot_message', {'data': "System Error: AI Brain Offline. (Check API Key)"})
+            emit('bot_message', {'data': "System Error: AI Brain Offline. (Check API Key and Model status)"})
 
     except Exception as e:
         print(f"AI Error: {e}")
-        emit('bot_message', {'data': "I'm having a slight connection issue. Could you repeat that?"})
-
+        emit('bot_message', {'data': "I'm having a slight connection issue with the AI. Could you repeat that?"})
+        
+        
+# This block is what a production server should use to run SocketIO correctly with eventlet.
+# However, many PAAS environments use the Gunicorn command line, which we cannot change here.
+# Leaving this here for local testing guidance.
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
-    # Note: socketio.run uses eventlet, which is why monkey_patch is necessary.
-    socketio.run(app, host='0.0.0.0', port=port)
+    # We use eventlet's WSGI server directly when running locally/manually.
+    print(f"Starting server on port {port}...")
+    socketio.run(app, host='0.0.0.0', port=port, debug=False)
