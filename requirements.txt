@@ -4,6 +4,5 @@ flask-cors
 gevent
 gevent-websocket
 gunicorn
-google-generativeai
 stripe
-
+requests
