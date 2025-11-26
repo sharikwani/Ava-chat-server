@@ -19,7 +19,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 
 if not stripe.api_key:
-    print("⚠️ WARNING: STRIPE_SECRET_KEY not found. Payments will fail.")
+    print("WARNING: STRIPE_SECRET_KEY not found. Payments will fail.")
 
 # Enable SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
