@@ -45,12 +45,14 @@ def ask_google_brain(history):
     if not GOOGLE_API_KEY:
         return "Error: AI Key Missing in Environment Variables"
 
-    # List of models to try in order of preference
+    # List of models to try in order of preference (Added gemini-1.0 models as fallback)
     models_to_try = [
         "gemini-1.5-flash",
         "gemini-1.5-flash-001",
         "gemini-1.5-pro",
-        "gemini-pro"
+        "gemini-1.0-pro",
+        "gemini-1.0-pro-001",
+        "gemini-pro" 
     ]
 
     # Convert chat history to Google's REST format
@@ -83,6 +85,7 @@ def ask_google_brain(history):
                 if 'candidates' in data and data['candidates']:
                     return data['candidates'][0]['content']['parts'][0]['text']
             else:
+                # If 404/403/400 error, save the code but keep trying
                 print(f"Failed {model_name}: {response.status_code}")
                 last_error = f"Error {response.status_code}"
                 
@@ -90,6 +93,7 @@ def ask_google_brain(history):
             print(f"Connection Error on {model_name}: {e}")
             last_error = str(e)
 
+    # If all models fail, return the last recorded error code
     return f"I'm having trouble connecting. ({last_error})"
 
 # --- MEMORY ---
