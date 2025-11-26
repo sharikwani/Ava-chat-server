@@ -10,12 +10,14 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 
 # --- ENABLE CORS ---
+# Fixes the "spinning" payment button issue
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- STRIPE CONFIGURATION ---
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 
 # --- SOCKET IO ---
+# Uses 'gevent' engine to prevent Stripe RecursionError
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
 # --- AI CONFIGURATION ---
@@ -45,7 +47,7 @@ def ask_google_brain(history):
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
     
-    # Convert our chat history to Google's REST format
+    # Convert chat history to Google's REST format
     gemini_contents = []
     for msg in history:
         role = "user" if msg['role'] == "user" else "model"
@@ -63,8 +65,8 @@ def ask_google_brain(history):
     }
 
     try:
-        # Standard HTTP Post request with increased timeout
-        response = requests.post(url, json=payload, timeout=30)
+        # Standard HTTP Post request with timeout
+        response = requests.post(url, json=payload, timeout=20)
         
         if response.status_code == 200:
             data = response.json()
@@ -75,11 +77,10 @@ def ask_google_brain(history):
                 return "I'm thinking..."
         else:
             print(f"Google API Error: {response.status_code} - {response.text}")
-            return f"System Error {response.status_code}: {response.text}"
+            return f"System Error {response.status_code}: Please try again."
             
     except Exception as e:
         print(f"Connection Error: {e}")
-        # Return the ACTUAL error so we can debug it
         return f"System Error: {str(e)}"
 
 # --- MEMORY ---
