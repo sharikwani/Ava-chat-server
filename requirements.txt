@@ -1,10 +1,6 @@
 flask
 flask-socketio
 flask-cors
-eventlet
 gunicorn
 stripe
 requests
-gevent-websocket
-
-
