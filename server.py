@@ -7,19 +7,19 @@ from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
+app.config['SECRET_KEY'] = 'secret!' # Simple secret for testing
 
-# --- ENABLE CORS FOR HTTP ROUTES ---
-# This fixes the "Payment Form Not Loading" issue
+# --- ENABLE CORS ---
+# This allows the frontend to make requests to the payment route
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- STRIPE CONFIGURATION ---
-stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
+# --- STRIPE CONFIGURATION (TEST KEY) ---
+# Hardcoded for immediate stability. 
 
 # Enable SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# --- ROBUST AI CONFIGURATION ---
+# --- AI CONFIGURATION ---
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 model = None
 
@@ -30,41 +30,25 @@ def configure_robust_ai():
 
     genai.configure(api_key=GOOGLE_API_KEY)
     
-    candidates = [
-        'gemini-1.5-flash',
-        'gemini-1.5-flash-001',
-        'gemini-1.5-pro',
-        'gemini-pro',
-        'gemini-1.0-pro'
-    ]
+    # Priority list of stable models (Filtering out previews)
+    candidates = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-1.5-pro', 'gemini-pro']
     
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                clean_name = m.name.replace('models/', '')
-                if clean_name not in candidates:
-                    if 'preview' not in clean_name and 'exp' not in clean_name:
-                        candidates.append(clean_name)
-    except Exception as e:
-        print(f"Warning: Could not list models: {e}")
-
     for name in candidates:
         try:
-            print(f"Testing: {name}...")
+            if 'preview' in name or 'exp' in name: continue
+            print(f"Testing AI Model: {name}...")
             temp_model = genai.GenerativeModel(name)
             temp_model.generate_content("Test")
             print(f"SUCCESS: Connected to {name}")
             return temp_model
         except Exception as e:
             print(f"Failed {name}: {e}")
-    
-    print("ALL MODELS FAILED. AI IS OFFLINE.")
     return None
 
 model = configure_robust_ai()
 chat_histories = {}
 
-# --- AVA'S INSTRUCTIONS ---
+# --- AVA'S UPDATED INSTRUCTIONS ---
 SYSTEM_INSTRUCTION = """
 You are Ava, the senior triage assistant for 'HelpByExperts'.
 Your goal is to gather a COMPLETE case history before finding an expert.
@@ -76,24 +60,24 @@ RULES:
 4. Be professional and empathetic.
 5. After the 5th answer, ask: "Is there anything else I should know before I connect you?"
 6. Once they answer that final check, end your message with: [PAYMENT_REQUIRED]
-7. Mention the $5 refundable fee before triggering the tag.
+7. PAYMENT RULE: You must explicitly state that the $5 fee is refundable ONLY if the customer is not satisfied with the answer. Do not imply it is automatically refundable.
 """
 
 @app.route('/')
 def index():
-    status = "Online" if model else "AI Offline"
-    return f"Ava AI & Payment Server is Running! AI Status: {status}"
+    return "Ava Server is Running (Updated Policy)"
 
 # --- PAYMENT ROUTE ---
 @app.route('/create-payment-intent', methods=['POST'])
 def create_payment():
+    print("Payment Intent Requested")
     try:
-        # Create a PaymentIntent with the order amount and currency
         intent = stripe.PaymentIntent.create(
             amount=500, # $5.00
             currency='usd',
             automatic_payment_methods={'enabled': True},
         )
+        print(f"Intent Created: {intent.id}")
         return jsonify({'clientSecret': intent.client_secret})
     except Exception as e:
         print(f"Stripe Error: {str(e)}")
@@ -104,7 +88,7 @@ def handle_connect():
     print(f'Client connected: {request.sid}')
     chat_histories[request.sid] = [
         {'role': 'user', 'parts': [SYSTEM_INSTRUCTION]},
-        {'role': 'model', 'parts': ["Understood. I will ask 5 questions."]}
+        {'role': 'model', 'parts': ["Understood. I will follow the 5-question rule and the strict refund policy."]}
     ]
     emit('bot_message', {'data': "Hi! I'm Ava. I can connect you with a verified expert. What problem are you facing today?"})
 
@@ -118,7 +102,9 @@ def handle_message(data):
     user_text = data.get('message', '').strip()
     user_id = request.sid
     
+    # Typing Indicator
     emit('bot_typing', {'status': 'true'})
+    # Natural Delay
     time.sleep(3)
     
     history = chat_histories.get(user_id, [])
