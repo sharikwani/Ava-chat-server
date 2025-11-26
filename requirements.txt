@@ -6,3 +6,4 @@ gevent-websocket
 gunicorn
 stripe
 requests
+google-generativeai
