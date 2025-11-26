@@ -1,4 +1,5 @@
 import os
+import time
 import google.generativeai as genai
 from flask import Flask, request
 from flask_socketio import SocketIO, emit
@@ -71,12 +72,12 @@ You are Ava, the expert assistant for 'HelpByExperts'.
 Your goal: Triage the user's problem before connecting them to a human.
 
 RULES:
-1. Greet the user and ask 2-3 clarifying questions about their issue.
-2. Be professional and empathetic.
-3. Do NOT give the final solution.
-4. After you have enough info, tell them: "I have found a verified expert who can solve this."
-5. CRITICAL: When ready to connect, end message with: [PAYMENT_REQUIRED]
-6. Mention the $5 refundable fee before triggering the tag.
+1. Greet the user and ask clarifying questions ONE BY ONE.
+2. KEEP QUESTIONS SHORT, concise, and to the point (max 1-2 sentences).
+3. Do NOT give solutions. Just gather info.
+4. After you have gathered enough info (usually 2-3 questions), you MUST ask exactly: "Is there anything else I should know before I connect you?"
+5. Once the user answers that final question, tell them you found an expert and end your message with: [PAYMENT_REQUIRED]
+6. Mention the $5 fully refundable expert connection fee before triggering the tag.
 """
 
 @app.route('/')
@@ -102,6 +103,12 @@ def handle_disconnect():
 def handle_message(data):
     user_text = data.get('message', '').strip()
     user_id = request.sid
+    
+    # 1. Signal that Ava is typing (Frontend can use this to show animation)
+    emit('bot_typing', {'status': 'typing'})
+    
+    # 2. Artificial Delay for natural feel (3 seconds)
+    time.sleep(3)
     
     history = chat_histories.get(user_id, [])
     history.append({'role': 'user', 'parts': [user_text]})
