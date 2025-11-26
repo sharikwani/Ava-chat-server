@@ -6,16 +6,17 @@ eventlet.monkey_patch()
 import os
 import time
 import stripe
-import google.generativeai as genai  # Module that was failing to import
+import google.generativeai as genai  # Make sure requirements.txt has google-generativeai
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
-app = Flask(__app_id) # Using __app_id for uniqueness
+app = Flask(__name__)  # Standard Flask app name
+
 # Load secret from environment; falls back to 'secret!' if not set (development)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 
-# --- ENABLE CORS for Payment Route ---
+# --- ENABLE CORS for all routes ---
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- STRIPE CONFIGURATION (SECURE) ---
@@ -24,8 +25,7 @@ stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 if not stripe.api_key:
     print("WARNING: STRIPE_SECRET_KEY not found. Payments will fail.")
 
-# Enable SocketIO
-# We explicitly set async_mode='eventlet' to work with the monkey patch.
+# Enable SocketIO with eventlet
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # --- ROBUST AI CONFIGURATION ---
@@ -40,10 +40,10 @@ def configure_robust_ai():
 
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
-        
+
         # Priority list of stable models for chat
         candidates = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-1.5-pro', 'gemini-pro']
-        
+
         # Test each candidate until one is successfully initialized and responds
         for name in candidates:
             try:
@@ -55,10 +55,10 @@ def configure_robust_ai():
                 return temp_model
             except Exception as e:
                 print(f"Failed {name}: {e}")
-        
+
         print("ALL MODELS FAILED. AI IS OFFLINE.")
         return None
-        
+
     except Exception as e:
         print(f"FATAL AI CLIENT ERROR: {e}")
         return None
@@ -92,10 +92,10 @@ def create_payment():
     print("💰 Payment Intent Requested")
     if not stripe.api_key:
         return jsonify({'error': 'Server Error: Payment key missing or invalid'}), 500
-        
+
     try:
         intent = stripe.PaymentIntent.create(
-            amount=500, # $5.00
+            amount=500,  # $5.00
             currency='usd',
             automatic_payment_methods={'enabled': True},
         )
@@ -119,27 +119,27 @@ def handle_connect():
 def handle_disconnect():
     if request.sid in chat_histories:
         del chat_histories[request.sid]
-        print(f'Client disconnected: {request.sid}')
+    print(f'Client disconnected: {request.sid}')
 
 @socketio.on('user_message')
 def handle_message(data):
     user_text = data.get('message', '').strip()
     user_id = request.sid
-    
+
     # Typing Indicator
     emit('bot_typing', {'status': 'true'})
     # Natural Delay
-    time.sleep(1) # Reduced delay for quicker interaction
-    
+    time.sleep(1)  # Reduced delay for quicker interaction
+
     history = chat_histories.get(user_id, [])
     history.append({'role': 'user', 'parts': [user_text]})
-    
+
     try:
         if model:
             # Pass the full history for contextual generation
             response = model.generate_content(history)
             ai_reply = response.text
-            
+
             history.append({'role': 'model', 'parts': [ai_reply]})
             chat_histories[user_id] = history
 
@@ -155,13 +155,8 @@ def handle_message(data):
     except Exception as e:
         print(f"AI Error: {e}")
         emit('bot_message', {'data': "I'm having a slight connection issue with the AI. Could you repeat that?"})
-        
-        
-# This block is what a production server should use to run SocketIO correctly with eventlet.
-# However, many PAAS environments use the Gunicorn command line, which we cannot change here.
-# Leaving this here for local testing guidance.
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
-    # We use eventlet's WSGI server directly when running locally/manually.
     print(f"Starting server on port {port}...")
     socketio.run(app, host='0.0.0.0', port=port, debug=False)
