@@ -41,7 +41,7 @@ def ask_google_brain(history):
     Direct HTTP call to Google Gemini to avoid gRPC/Gevent conflicts.
     """
     if not GOOGLE_API_KEY:
-        return "Error: AI Key Missing"
+        return "Error: AI Key Missing in Environment Variables"
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
     
@@ -63,8 +63,8 @@ def ask_google_brain(history):
     }
 
     try:
-        # Standard HTTP Post request
-        response = requests.post(url, json=payload, timeout=10)
+        # Standard HTTP Post request with increased timeout
+        response = requests.post(url, json=payload, timeout=30)
         
         if response.status_code == 200:
             data = response.json()
@@ -75,11 +75,12 @@ def ask_google_brain(history):
                 return "I'm thinking..."
         else:
             print(f"Google API Error: {response.status_code} - {response.text}")
-            return f"I'm having trouble thinking right now (Error {response.status_code})."
+            return f"System Error {response.status_code}: {response.text}"
             
     except Exception as e:
         print(f"Connection Error: {e}")
-        return "I'm having a connection issue. Please try again."
+        # Return the ACTUAL error so we can debug it
+        return f"System Error: {str(e)}"
 
 # --- MEMORY ---
 chat_histories = {}
