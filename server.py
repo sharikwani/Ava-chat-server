@@ -1,7 +1,7 @@
 import os
 import time
+import requests
 import stripe
-import google.generativeai as genai
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
@@ -15,49 +15,11 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 # --- STRIPE CONFIGURATION ---
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 
-if not stripe.api_key:
-    print("WARNING: STRIPE_SECRET_KEY not found.")
-
 # --- SOCKET IO ---
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
-# --- GLOBALS ---
+# --- AI CONFIGURATION ---
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
-active_model = None  # Will be loaded on first request
-chat_histories = {}
-
-# --- AI LOADING LOGIC ---
-def get_ai_model():
-    global active_model
-    if active_model:
-        return active_model
-    
-    if not GOOGLE_API_KEY:
-        return None
-
-    try:
-        genai.configure(api_key=GOOGLE_API_KEY)
-        # Try the most stable model first
-        candidates = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-1.5-pro', 'gemini-pro']
-        
-        for name in candidates:
-            try:
-                print(f"Attempting to load AI model: {name}")
-                temp_model = genai.GenerativeModel(name)
-                # Quick test
-                temp_model.generate_content("Hello")
-                print(f"SUCCESS: AI Model {name} loaded.")
-                active_model = temp_model
-                return active_model
-            except Exception as inner_e:
-                print(f"Failed to load {name}: {inner_e}")
-                continue
-                
-    except Exception as e:
-        print(f"Fatal AI Config Error: {e}")
-        return None
-        
-    return None
 
 # --- AVA'S INSTRUCTIONS ---
 SYSTEM_INSTRUCTION = """
@@ -74,9 +36,57 @@ RULES:
 7. PAYMENT RULE: You must explicitly state that the $5 fee is refundable ONLY if the customer is not satisfied with the answer. Do not imply it is automatically refundable.
 """
 
+def ask_google_brain(history):
+    """
+    Direct HTTP call to Google Gemini to avoid gRPC/Gevent conflicts.
+    """
+    if not GOOGLE_API_KEY:
+        return "Error: AI Key Missing"
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
+    
+    # Convert our chat history to Google's REST format
+    gemini_contents = []
+    for msg in history:
+        role = "user" if msg['role'] == "user" else "model"
+        gemini_contents.append({
+            "role": role,
+            "parts": [{"text": msg['parts'][0]}]
+        })
+
+    # Construct payload
+    payload = {
+        "contents": gemini_contents,
+        "system_instruction": {
+            "parts": [{"text": SYSTEM_INSTRUCTION}]
+        }
+    }
+
+    try:
+        # Standard HTTP Post request
+        response = requests.post(url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Extract text from the JSON response
+            if 'candidates' in data and data['candidates']:
+                return data['candidates'][0]['content']['parts'][0]['text']
+            else:
+                return "I'm thinking..."
+        else:
+            print(f"Google API Error: {response.status_code} - {response.text}")
+            return f"I'm having trouble thinking right now (Error {response.status_code})."
+            
+    except Exception as e:
+        print(f"Connection Error: {e}")
+        return "I'm having a connection issue. Please try again."
+
+# --- MEMORY ---
+chat_histories = {}
+
 @app.route('/')
 def index():
-    return "Ava Server (Gevent/LazyLoad) is Running!"
+    return "Ava Server (REST API Version) is Running!"
 
 @app.route('/create-payment-intent', methods=['POST'])
 def create_payment():
@@ -96,10 +106,8 @@ def create_payment():
 @socketio.on('connect')
 def handle_connect():
     print(f'Client connected: {request.sid}')
-    chat_histories[request.sid] = [
-        {'role': 'user', 'parts': [SYSTEM_INSTRUCTION]},
-        {'role': 'model', 'parts': ["Understood. I will ask 5 questions."]}
-    ]
+    # Initialize clean history for the API
+    chat_histories[request.sid] = [] 
     emit('bot_message', {'data': "Hi! I'm Ava. I can connect you with a verified expert. What problem are you facing today?"})
 
 @socketio.on('disconnect')
@@ -113,38 +121,24 @@ def handle_message(data):
     user_id = request.sid
     
     emit('bot_typing', {'status': 'true'})
-    time.sleep(3)
+    time.sleep(2) # Slightly faster response feel
     
     history = chat_histories.get(user_id, [])
     history.append({'role': 'user', 'parts': [user_text]})
     
-    # Try to get the AI model (Lazy Load)
-    model_instance = get_ai_model()
+    # Get response via REST API
+    ai_reply = ask_google_brain(history)
     
-    if not model_instance:
-        # DEBUG MODE: Tell the user exactly why it failed
-        error_reason = "API Key Missing" if not GOOGLE_API_KEY else "Connection Refused to Google"
-        emit('bot_message', {'data': f"⚠️ System Error: AI Brain Offline ({error_reason}). Check Render Logs."})
-        return
+    # Save AI reply
+    history.append({'role': 'model', 'parts': [ai_reply]})
+    chat_histories[user_id] = history
 
-    try:
-        response = model_instance.generate_content(history)
-        ai_reply = response.text
-        
-        history.append({'role': 'model', 'parts': [ai_reply]})
-        chat_histories[user_id] = history
-
-        if "[PAYMENT_REQUIRED]" in ai_reply:
-            clean_reply = ai_reply.replace("[PAYMENT_REQUIRED]", "").strip()
-            emit('bot_message', {'data': clean_reply})
-            emit('payment_trigger', {'amount': 5.00})
-        else:
-            emit('bot_message', {'data': ai_reply})
-
-    except Exception as e:
-        print(f"AI Execution Error: {e}")
-        # Send exact error to chat for debugging
-        emit('bot_message', {'data': f"⚠️ AI Error: {str(e)}"})
+    if "[PAYMENT_REQUIRED]" in ai_reply:
+        clean_reply = ai_reply.replace("[PAYMENT_REQUIRED]", "").strip()
+        emit('bot_message', {'data': clean_reply})
+        emit('payment_trigger', {'amount': 5.00})
+    else:
+        emit('bot_message', {'data': ai_reply})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
