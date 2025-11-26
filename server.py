@@ -1,16 +1,24 @@
 import os
 import time
+import stripe
 import google.generativeai as genai
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 
+# --- STRIPE CONFIGURATION ---
+# Securely load the key from Environment Variables
+stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
+
+if not stripe.api_key:
+    print("WARNING: STRIPE_SECRET_KEY not found. Payments will fail.")
+
 # Enable CORS
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# --- 2. ROBUST AI CONFIGURATION ---
+# --- ROBUST AI CONFIGURATION ---
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 model = None
 
@@ -38,7 +46,6 @@ def configure_robust_ai():
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
                 clean_name = m.name.replace('models/', '')
-                # STRICT FILTER: Skip experimental/preview to avoid quota limits
                 if clean_name not in candidates:
                     if 'preview' not in clean_name and 'exp' not in clean_name:
                         candidates.append(clean_name)
@@ -52,7 +59,6 @@ def configure_robust_ai():
         try:
             print(f"Testing: {name}...")
             temp_model = genai.GenerativeModel(name)
-            # Fire a test prompt
             temp_model.generate_content("Test")
             print(f"SUCCESS: Connected to {name}")
             return temp_model
@@ -62,37 +68,49 @@ def configure_robust_ai():
     print("ALL MODELS FAILED. AI IS OFFLINE.")
     return None
 
-# Initialize the best working model
 model = configure_robust_ai()
-
-# --- 3. MEMORY STORAGE ---
 chat_histories = {}
 
-# --- 4. AVA'S INSTRUCTIONS ---
+# --- AVA'S STRICT INSTRUCTIONS ---
 SYSTEM_INSTRUCTION = """
-You are Ava, the expert assistant for 'HelpByExperts'.
-Your goal: Triage the user's problem before connecting them to a human.
+You are Ava, the senior triage assistant for 'HelpByExperts'.
+Your goal is to gather a COMPLETE case history before finding an expert.
 
 RULES:
-1. Greet the user and ask clarifying questions ONE BY ONE.
-2. KEEP QUESTIONS SHORT, concise, and to the point (max 1-2 sentences).
-3. Do NOT give solutions. Just gather info.
-4. After you have gathered enough info (usually 2-3 questions), you MUST ask exactly: "Is there anything else I should know before I connect you?"
-5. Once the user answers that final question, tell them you found an expert and end your message with: [PAYMENT_REQUIRED]
-6. Mention the $5 fully refundable expert connection fee before triggering the tag.
+1. You MUST ask exactly 5 relevant clarifying questions, ONE BY ONE.
+2. Do not connect the user until you have asked all 5 questions.
+3. KEEP QUESTIONS SHORT (max 1 sentence).
+4. Be professional and empathetic.
+5. After the 5th answer, ask: "Is there anything else I should know before I connect you?"
+6. Once they answer that final check, end your message with: [PAYMENT_REQUIRED]
+7. Mention the $5 refundable fee before triggering the tag.
 """
 
 @app.route('/')
 def index():
-    status = "AI Online" if model else "AI Offline (Check Logs)"
-    return f"Ava Server is Running! Status: {status}"
+    status = "Online" if model else "AI Offline"
+    return f"Ava AI & Payment Server is Running! AI Status: {status}"
+
+# --- PAYMENT ROUTE ---
+@app.route('/create-payment-intent', methods=['POST'])
+def create_payment():
+    try:
+        # Create a PaymentIntent with the order amount and currency
+        intent = stripe.PaymentIntent.create(
+            amount=500, # $5.00 in cents
+            currency='usd',
+            automatic_payment_methods={'enabled': True},
+        )
+        return jsonify({'clientSecret': intent.client_secret})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 403
 
 @socketio.on('connect')
 def handle_connect():
     print(f'Client connected: {request.sid}')
     chat_histories[request.sid] = [
         {'role': 'user', 'parts': [SYSTEM_INSTRUCTION]},
-        {'role': 'model', 'parts': ["Understood. I am ready to act as Ava."]}
+        {'role': 'model', 'parts': ["Understood. I will ask 5 questions one by one."]}
     ]
     emit('bot_message', {'data': "Hi! I'm Ava. I can connect you with a verified expert. What problem are you facing today?"})
 
@@ -106,10 +124,10 @@ def handle_message(data):
     user_text = data.get('message', '').strip()
     user_id = request.sid
     
-    # 1. Signal that Ava is typing
-    emit('bot_typing', {'status': 'typing'})
+    # 1. Show Typing Indicator
+    emit('bot_typing', {'status': 'true'})
     
-    # 2. Artificial Delay for natural feel (3 seconds)
+    # 2. Realistic Delay (3 seconds)
     time.sleep(3)
     
     history = chat_histories.get(user_id, [])
@@ -130,11 +148,11 @@ def handle_message(data):
             else:
                 emit('bot_message', {'data': ai_reply})
         else:
-            emit('bot_message', {'data': "System Error: No working AI model found. Please check server logs."})
+            emit('bot_message', {'data': "System Error: AI Brain Offline."})
 
     except Exception as e:
         print(f"AI Error: {e}")
-        emit('bot_message', {'data': f"Error: {str(e)}"})
+        emit('bot_message', {'data': "I'm having a slight connection issue. Could you repeat that?"})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
