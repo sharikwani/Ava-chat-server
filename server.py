@@ -16,7 +16,7 @@ model = None
 
 def configure_robust_ai():
     """
-    Tries multiple model names to find one that works for this API Key/Region.
+    Finds a working model while avoiding 'preview' models that cause 429 errors.
     """
     if not GOOGLE_API_KEY:
         print("FATAL: GOOGLE_API_KEY not found.")
@@ -24,7 +24,7 @@ def configure_robust_ai():
 
     genai.configure(api_key=GOOGLE_API_KEY)
     
-    # Priority list of models to try
+    # Priority list of stable models
     candidates = [
         'gemini-1.5-flash',
         'gemini-1.5-flash-001',
@@ -33,13 +33,15 @@ def configure_robust_ai():
         'gemini-1.0-pro'
     ]
     
-    # Also ask Google what is available
+    # Query available models but filter out unstable ones
     try:
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
                 clean_name = m.name.replace('models/', '')
+                # STRICT FILTER: Skip experimental/preview to avoid quota limits
                 if clean_name not in candidates:
-                    candidates.append(clean_name)
+                    if 'preview' not in clean_name and 'exp' not in clean_name:
+                        candidates.append(clean_name)
     except Exception as e:
         print(f"Warning: Could not list models: {e}")
 
@@ -104,7 +106,7 @@ def handle_message(data):
     user_text = data.get('message', '').strip()
     user_id = request.sid
     
-    # 1. Signal that Ava is typing (Frontend can use this to show animation)
+    # 1. Signal that Ava is typing
     emit('bot_typing', {'status': 'typing'})
     
     # 2. Artificial Delay for natural feel (3 seconds)
