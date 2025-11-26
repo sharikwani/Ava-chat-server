@@ -1,7 +1,9 @@
 flask
 flask-socketio
 flask-cors
-eventlet
+gevent
+gevent-websocket
 gunicorn
 google-generativeai
 stripe
+
