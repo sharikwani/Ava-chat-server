@@ -1,3 +1,7 @@
+# --- 1. CRITICAL FIX: Monkey Patch must be FIRST ---
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import time
 import stripe
@@ -138,6 +142,7 @@ def handle_message(data):
     
     try:
         if model:
+            # The model is intelligent enough to follow instructions, so we pass the whole history.
             response = model.generate_content(history)
             ai_reply = response.text
             
@@ -159,4 +164,5 @@ def handle_message(data):
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
+    # Note: socketio.run uses eventlet, which is why monkey_patch is necessary.
     socketio.run(app, host='0.0.0.0', port=port)
