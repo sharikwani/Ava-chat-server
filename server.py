@@ -40,12 +40,20 @@ RULES:
 def ask_google_brain(history):
     """
     Direct HTTP call to Google Gemini.
+    Retries multiple model versions to find a working one (Self-Healing).
     """
     if not GOOGLE_API_KEY:
         return "Error: AI Key Missing in Environment Variables"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
-    
+    # List of models to try in order of preference
+    models_to_try = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-pro",
+        "gemini-pro"
+    ]
+
+    # Convert chat history to Google's REST format
     gemini_contents = []
     for msg in history:
         role = "user" if msg['role'] == "user" else "model"
@@ -61,22 +69,28 @@ def ask_google_brain(history):
         }
     }
 
-    try:
-        response = requests.post(url, json=payload, timeout=20)
+    last_error = "Unknown Error"
+
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GOOGLE_API_KEY}"
         
-        if response.status_code == 200:
-            data = response.json()
-            if 'candidates' in data and data['candidates']:
-                return data['candidates'][0]['content']['parts'][0]['text']
-            else:
-                return "I'm thinking..."
-        else:
-            print(f"Google API Error: {response.status_code} - {response.text}")
-            return f"System Error {response.status_code}: Please try again."
+        try:
+            # Standard HTTP Post request
+            response = requests.post(url, json=payload, timeout=20)
             
-    except Exception as e:
-        print(f"Connection Error: {e}")
-        return f"System Error: {str(e)}"
+            if response.status_code == 200:
+                data = response.json()
+                if 'candidates' in data and data['candidates']:
+                    return data['candidates'][0]['content']['parts'][0]['text']
+            else:
+                print(f"Failed {model_name}: {response.status_code}")
+                last_error = f"Error {response.status_code}"
+                
+        except Exception as e:
+            print(f"Connection Error on {model_name}: {e}")
+            last_error = str(e)
+
+    return f"I'm having trouble connecting. ({last_error})"
 
 # --- MEMORY ---
 chat_histories = {}
