@@ -4,3 +4,4 @@ flask-cors
 eventlet
 stripe
 google-genai
+gunicorn
