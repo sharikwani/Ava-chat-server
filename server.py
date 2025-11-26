@@ -7,22 +7,22 @@ from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
 app = Flask(__name__)
-# Load secret from environment; falls back to 'secret!' if not set (development)
+# Load secret from environment; falls back to 'secret!' if not set
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'secret!')
 
-# --- ENABLE CORS for Payment Route ---
+# --- ENABLE CORS ---
 # This allows the frontend to make requests to the payment route
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- STRIPE CONFIGURATION (SECURE) ---
-# Pulls key from Render Environment Variables (NO HARDCODING)
+# --- STRIPE CONFIGURATION ---
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY')
 
 if not stripe.api_key:
     print("WARNING: STRIPE_SECRET_KEY not found. Payments will fail.")
 
-# Enable SocketIO
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+# --- SOCKET IO (Using Gevent) ---
+# Changed async_mode to 'gevent' for stability with Stripe
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
 # --- ROBUST AI CONFIGURATION ---
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
@@ -38,37 +38,22 @@ def configure_robust_ai():
     # Priority list of stable models
     candidates = ['gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-1.5-pro', 'gemini-pro']
     
-    # Query available models and strictly filter out preview/exp models
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                clean_name = m.name.replace('models/', '')
-                if clean_name not in candidates:
-                    if 'preview' not in clean_name and 'exp' not in clean_name:
-                        candidates.append(clean_name)
-    except Exception as e:
-        print(f"Warning: Could not list models: {e}")
-
-    print(f"Testing models: {candidates}")
-
-    # Test each candidate
     for name in candidates:
         try:
-            print(f"Testing: {name}...")
+            if 'preview' in name or 'exp' in name: continue
+            print(f"Testing AI Model: {name}...")
             temp_model = genai.GenerativeModel(name)
             temp_model.generate_content("Test")
             print(f"SUCCESS: Connected to {name}")
             return temp_model
         except Exception as e:
             print(f"Failed {name}: {e}")
-    
-    print("ALL MODELS FAILED. AI IS OFFLINE.")
     return None
 
 model = configure_robust_ai()
 chat_histories = {}
 
-# --- AVA'S STRICT INSTRUCTIONS ---
+# --- AVA'S INSTRUCTIONS ---
 SYSTEM_INSTRUCTION = """
 You are Ava, the senior triage assistant for 'HelpByExperts'.
 Your goal is to gather a COMPLETE case history before finding an expert.
@@ -85,28 +70,26 @@ RULES:
 
 @app.route('/')
 def index():
-    ai_status = "Online" if model else "Offline"
-    return f"Ava Server Running. AI: {ai_status}"
+    return "Ava Server (Gevent Edition) is Running!"
 
 # --- PAYMENT ROUTE ---
 @app.route('/create-payment-intent', methods=['POST'])
 def create_payment():
-    print("💰 Payment Intent Requested")
+    print("Payment Intent Requested")
     if not stripe.api_key:
-        # Returns an error if the key is missing from Environment Vars
-        return jsonify({'error': 'Server Error: Payment key missing or invalid'}), 500
+        return jsonify({'error': 'Server Error: Stripe Key Missing'}), 500
         
     try:
+        # Create a PaymentIntent with the order amount and currency
         intent = stripe.PaymentIntent.create(
-            amount=500, # $5.00
+            amount=500, # $5.00 in cents
             currency='usd',
             automatic_payment_methods={'enabled': True},
         )
-        print(f"✅ Intent Created: {intent.id}")
+        print(f"Intent Created: {intent.id}")
         return jsonify({'clientSecret': intent.client_secret})
     except Exception as e:
-        print(f"❌ Stripe Error: {str(e)}")
-        # Note: If the error is an Invalid API Key, the Stripe library throws an error here.
+        print(f"Stripe Error: {str(e)}")
         return jsonify({'error': str(e)}), 403
 
 @socketio.on('connect')
@@ -130,7 +113,6 @@ def handle_message(data):
     
     # Typing Indicator
     emit('bot_typing', {'status': 'true'})
-    # Natural Delay
     time.sleep(3)
     
     history = chat_histories.get(user_id, [])
@@ -151,7 +133,7 @@ def handle_message(data):
             else:
                 emit('bot_message', {'data': ai_reply})
         else:
-            emit('bot_message', {'data': "System Error: AI Brain Offline. (Check API Key)"})
+            emit('bot_message', {'data': "System Error: AI Brain Offline."})
 
     except Exception as e:
         print(f"AI Error: {e}")
