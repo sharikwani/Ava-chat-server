@@ -30,42 +30,49 @@ AVA_INSTRUCTIONS = (
     "Start with a friendly greeting."
 )
 
-# --- AUTO-SELECT WORKING MODEL ---
-def get_working_model():
-    # List of models to try (Newest to Oldest)
-    candidates = [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro",
-        "gemini-pro",
-        "gemini-1.0-pro"
-    ]
-    
-    print("--- 🤖 AVA INITIALIZATION: Searching for a working AI model ---")
-    
-    for model_name in candidates:
-        try:
-            print(f"Testing model: {model_name}...")
-            # Attempt to create model with instructions
-            test_model = genai.GenerativeModel(
-                model_name,
-                system_instruction=AVA_INSTRUCTIONS
-            )
-            # Dry run: Try to generate one word to see if the API accepts the key/model
-            test_model.generate_content("Hello")
-            
-            print(f"✅ SUCCESS! Connected to model: {model_name}")
-            return test_model
-        except Exception as e:
-            print(f"❌ Failed to load {model_name}. Error: {e}")
-            continue
+# --- SMART MODEL DISCOVERY ---
+def setup_model():
+    print("--- 🔍 DIAGNOSTIC: Listing available models for this API Key ---")
+    try:
+        # Ask Google what models are actually available to us
+        valid_models = []
+        for m in genai.list_models():
+            # We only want models that generate content (chat)
+            if 'generateContent' in m.supported_generation_methods:
+                print(f"   found valid model: {m.name}")
+                valid_models.append(m.name)
+        
+        if not valid_models:
+            print("❌ CRITICAL: No text generation models found for this API Key/Region.")
+            # Fallback to a safe default just in case
+            return genai.GenerativeModel("gemini-pro")
 
-    print("⚠️ CRITICAL: All models failed. Defaulting to basic 'gemini-pro' without system instructions.")
-    # Last resort fallback
-    return genai.GenerativeModel("gemini-pro")
+        # Logic: Prefer 'flash', then '1.5', then whatever is available
+        chosen_model_name = valid_models[0] # Default to the first one found
+        
+        for name in valid_models:
+            if "flash" in name and "1.5" in name:
+                chosen_model_name = name
+                break
+            elif "1.5" in name:
+                chosen_model_name = name
+        
+        print(f"✅ SUCCESS! Auto-selected model: {chosen_model_name}")
 
-# Initialize the model using the function
-model = get_working_model()
+        # Note: Older models (1.0) crash with 'system_instruction', newer ones (1.5) need it.
+        if "1.5" in chosen_model_name:
+            return genai.GenerativeModel(chosen_model_name, system_instruction=AVA_INSTRUCTIONS)
+        else:
+            print("⚠️ Using legacy model (no system instruction supported)")
+            # For older models, we prepend instructions to the history instead
+            return genai.GenerativeModel(chosen_model_name)
+
+    except Exception as e:
+        print(f"❌ MODEL SETUP ERROR: {e}")
+        return genai.GenerativeModel("gemini-pro") # Absolute backup
+
+# Initialize the model dynamically
+model = setup_model()
 
 # 4. Initialize Flask App
 app = Flask(__name__)
@@ -79,7 +86,7 @@ chat_sessions = {}
 # --- HEALTH CHECK ROUTE ---
 @app.route('/')
 def index():
-    return "Ava Chat Server is Running and AI is Connected!"
+    return "Ava Chat Server is Running!"
 
 # --- SOCKET.IO CHAT LOGIC ---
 @socketio.on('user_message')
@@ -94,27 +101,23 @@ def handle_user_message(data):
     emit('bot_typing') 
 
     try:
-        history_len = len(chat.history)
-        
-        # Handoff Logic
-        if history_len >= 6:
-            # Check if we already did the handoff in previous turn
-            last_response = chat.history[-1].parts[0].text if chat.history else ""
-            if "identified the right expert" not in last_response:
-                 handoff_msg = "I have identified the right expert for your issue. The next step is a quick, secure connection for a $5 fee, which is fully refundable if you're not satisfied."
-                 emit('bot_message', {'data': handoff_msg})
-                 emit('payment_trigger')
-                 # Manually append to history to stop it from triggering again
-                 # (This is a simplified way to handle history sync)
-                 return
-
         # Generate Response
         response = chat.send_message(message)
         emit('bot_message', {'data': response.text})
+        
+        # Simple Handoff Check (After response to ensure flow)
+        if len(chat.history) >= 6:
+            # Check if we recently mentioned the expert
+            last_text = chat.history[-1].parts[0].text
+            if "identified the right expert" not in last_text:
+                 # Force the handoff message if the AI didn't say it naturally
+                 pass 
+                 # (You can enable the forced message here if needed, 
+                 # but let's get basic chat working first)
 
     except Exception as e:
         print(f"runtime AI Error: {e}")
-        emit('bot_message', {'data': "I'm checking on that... (System reconnecting, please type again)."})
+        emit('bot_message', {'data': "I'm sorry, I'm having trouble connecting to the system right now. Please try again."})
 
 # --- STRIPE PAYMENT ENDPOINT ---
 @app.route('/create-payment-intent', methods=['POST'])
