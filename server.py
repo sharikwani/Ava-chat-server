@@ -8,6 +8,7 @@ import os
 import time
 import random
 from flask import Flask, jsonify, request
+from flask_cors import CORS  # <--- NEW IMPORT
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -69,6 +70,10 @@ model = setup_model()
 # 4. Initialize Flask App
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'default_secret_key')
+
+# <--- ENABLE CORS FOR ALL ROUTES (Fixes the Fetch Error) --->
+CORS(app, resources={r"/*": {"origins": "*"}}) 
+
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -77,7 +82,7 @@ chat_sessions = {}
 # --- HEALTH CHECK ---
 @app.route('/')
 def index():
-    return "Ava 2.2 (Stripe Checkout Edition) is Running!"
+    return "Ava 2.3 (CORS Enabled) is Running!"
 
 # --- SOCKET.IO CHAT LOGIC ---
 @socketio.on('user_message')
@@ -93,7 +98,6 @@ def handle_user_message(data):
     chat = chat_sessions[user_id]
     emit('bot_typing') 
 
-    # Typing delay
     time_to_sleep = random.uniform(2.0, 3.0)
     eventlet.sleep(time_to_sleep) 
 
@@ -112,13 +116,11 @@ def handle_user_message(data):
         print(f"AI Error: {e}")
         emit('bot_message', {'data': "I'm checking on that... (Connection blip, please type again)."})
 
-# --- NEW: STRIPE CHECKOUT SESSION ---
+# --- STRIPE CHECKOUT SESSION ---
 @app.route('/create-checkout-session', methods=['POST'])
 def create_checkout_session():
     try:
-        # We determine the URL of your frontend so we know where to redirect back to
-        # If running locally or on a different domain, this 'Origin' header helps us find home.
-        # Fallback to your Render URL if Origin is missing.
+        # Determine redirect URL
         base_url = request.headers.get('Origin', 'https://ava-assistant-api.onrender.com')
 
         session = stripe.checkout.Session.create(
@@ -136,12 +138,12 @@ def create_checkout_session():
                 },
             ],
             mode='payment',
-            # Redirect back to your site with a success flag
             success_url=f"{base_url}/?payment_success=true",
             cancel_url=f"{base_url}/?payment_canceled=true",
         )
         return jsonify(url=session.url)
     except Exception as e:
+        print(f"Stripe Error: {e}")
         return jsonify(error=str(e)), 500
 
 if __name__ == '__main__':
