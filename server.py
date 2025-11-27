@@ -16,7 +16,7 @@ app = Flask(__name__)
 # Secret key for sessions (use env var in production)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "secret!")
 
-# Enable CORS for all routes (you can restrict this later if needed)
+# Enable CORS for all routes
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- STRIPE CONFIG ---
@@ -39,7 +39,7 @@ AI_MODEL_NAME = None
 def configure_robust_ai():
     """
     Configure the Gemini client and pick a working model.
-    If anything fails, return None and keep the server running.
+    Uses v1 model names that exist for google-generativeai>=0.8.x.
     """
     global AI_STATUS, AI_ERROR, AI_MODEL_NAME
 
@@ -52,22 +52,21 @@ def configure_robust_ai():
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
 
-        # Try models in this order
+        # v1 model names – these work with google-generativeai 0.8.x
         candidate_models = [
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-pro-latest",
             "gemini-1.5-flash",
-            "gemini-1.5-flash-001",
             "gemini-1.5-pro",
-            "gemini-pro",
+            "gemini-1.0-pro",
         ]
 
         for name in candidate_models:
             try:
                 print(f"[AI] Testing model: {name} ...")
                 test_model = genai.GenerativeModel(name)
-
-                # Light sanity test – avoid heavy prompt
+                # Light sanity test
                 resp = test_model.generate_content("ping")
-                # If we got here without exception, we assume it's fine
                 print(f"[AI] SUCCESS: Using model '{name}'")
                 AI_STATUS = "Online"
                 AI_ERROR = None
@@ -122,8 +121,7 @@ def index():
 @app.route("/ai-status")
 def ai_status():
     """
-    Small debug endpoint so you can see from the browser WHY AI is offline.
-    Does not expose secret keys, only status text.
+    Debug endpoint so you can see WHY AI is offline from the browser.
     """
     return jsonify(
         {
@@ -229,8 +227,6 @@ def handle_user_message(data):
             else:
                 emit("bot_message", {"data": ai_reply})
         else:
-            # Use AI_ERROR to tell you (the owner) what’s wrong, but keep
-            # message generic for user.
             print(f"[AI] model is None. Status={AI_STATUS}, Error={AI_ERROR}")
             emit(
                 "bot_message",
@@ -255,5 +251,4 @@ def handle_user_message(data):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     print(f"Starting Ava server on port {port} ...")
-    # For local run: python server.py
     socketio.run(app, host="0.0.0.0", port=port, debug=False)
