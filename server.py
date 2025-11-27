@@ -1,164 +1,70 @@
-# --- 1. CRITICAL: Eventlet monkey patch must be FIRST ---
-import eventlet
-eventlet.monkey_patch()
-
 import os
-import time
-import stripe
-import google.generativeai as genai
-from flask import Flask, request, jsonify, request as flask_request
-from flask_socketio import SocketIO, emit
-from flask_cors import CORS
+    import json
+    from flask import Flask, request, jsonify
+    from google import genai
+    from google.genai import types
 
-# ---------- FLASK APP ----------
-app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "secret!")
+    # Initialize the Flask app
+    # The application variable is still named 'app', which Gunicorn will use.
+    app = Flask(__name__)
 
-CORS(app, resources={r"/*": {"origins": "*"}})
+    # --- Core Gemini LLM Function ---
+    def get_assistant_response(prompt):
+        """
+        Connects to the Gemini API and gets a response for a given prompt.
+        This function expects the GEMINI_API_KEY environment variable to be set.
+        """
+        # Render will inject the key via environment variables
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            # If the key isn't set, we can't run the AI model.
+            return "Error: GEMINI_API_KEY not set. Cannot connect to the AI model."
+        
+        try:
+            # Initialize the client with the API key
+            client = genai.Client(api_key=api_key)
 
-# ---------- STRIPE CONFIG ----------
-stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
-if not stripe.api_key:
-    print("WARNING: STRIPE_SECRET_KEY not found. Payments will fail.")
+            # Define the AI's persona and settings
+            config = types.GenerateContentConfig(
+                system_instruction="You are Ava, a helpful, cheerful, and insightful personal assistant. Keep your responses concise and focused.",
+                temperature=0.7,
+            )
 
-# ---------- SOCKET.IO CONFIG ----------
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+            # Call the model
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=config,
+            )
+            
+            return response.text
 
-# ---------- GEMINI / GOOGLE AI CONFIG ----------
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+        except Exception as e:
+            app.logger.error(f"Gemini API Error: {e}")
+            return f"An internal error occurred: {str(e)}"
 
-model = None
-AI_STATUS = "Initializing"
-AI_ERROR = None
-AI_MODEL_NAME = None
+    # --- Flask Routes ---
 
+    @app.route("/")
+    def health_check():
+        """Simple health check for Render monitoring."""
+        return jsonify({"status": "Ava is running on Render", "service": "Backend"})
 
-def configure_robust_ai():
-    """
-    Configure Gemini. If it fails, we still run the server and use a rule-based fallback.
-    """
-    global AI_STATUS, AI_ERROR, AI_MODEL_NAME
+    @app.route("/ask", methods=["POST"])
+    def ask_assistant():
+        """Endpoint to handle user queries."""
+        data = request.get_json(silent=True)
+        user_prompt = data.get("prompt", "")
 
-    if not GOOGLE_API_KEY:
-        AI_STATUS = "Offline"
-        AI_ERROR = "GOOGLE_API_KEY environment variable is missing"
-        print("[AI] FATAL: GOOGLE_API_KEY not found. AI will be offline.")
-        return None
+        if not user_prompt:
+            return jsonify({"response": "Please provide a prompt."}), 400
 
-    try:
-        genai.configure(api_key=GOOGLE_API_KEY)
+        # Get response from the LLM
+        ai_response = get_assistant_response(user_prompt)
 
-        # v1 model names for google-generativeai >= 0.8.x
-        candidate_models = [
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-pro-latest",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-1.0-pro",
-        ]
+        return jsonify({"response": ai_response})
 
-        for name in candidate_models:
-            try:
-                print(f"[AI] Testing model: {name} ...")
-                test_model = genai.GenerativeModel(name)
-                # Very light sanity test
-                _ = test_model.generate_content("ping")
-                print(f"[AI] SUCCESS: Using model '{name}'")
-                AI_STATUS = "Online"
-                AI_ERROR = None
-                AI_MODEL_NAME = name
-                return test_model
-            except Exception as e:
-                print(f"[AI] Failed model '{name}': {e}")
-                AI_STATUS = "Degraded"
-                AI_ERROR = f"Last failed model: {name} – {e}"
-
-        print("[AI] ALL MODELS FAILED. AI is OFFLINE.")
-        if not AI_ERROR:
-            AI_ERROR = "All candidate models failed."
-        AI_STATUS = "Offline"
-        return None
-
-    except Exception as e:
-        print(f"[AI] FATAL AI CLIENT ERROR: {e}")
-        AI_STATUS = "Offline"
-        AI_ERROR = f"Fatal AI client error: {e}"
-        return None
-
-
-model = configure_robust_ai()
-
-# ---------- STATE: CHAT HISTORIES & FALLBACK FLOW ----------
-chat_histories = {}
-
-# For rule-based fallback Ava when AI is offline
-fallback_questions = [
-    "Can you briefly describe the main problem you’re facing?",
-    "How long has this issue been happening?",
-    "Have you already tried anything to fix it? If yes, what?",
-    "Is there any device, website, or service involved (for example: Dell PC, Norton, banking app, etc.)?",
-    "How urgent is this for you on a scale from 1 (not urgent) to 5 (very urgent)?",
-]
-
-# track per-socket fallback state
-fallback_state = {}  # sid -> {"step": int, "done": bool}
-
-# ---------- AVA SYSTEM INSTRUCTION (for real AI) ----------
-SYSTEM_INSTRUCTION = """
-You are Ava, the senior triage assistant for 'HelpByExperts'.
-Your goal is to gather a COMPLETE case history before finding an expert.
-
-RULES:
-1. You MUST ask exactly 5 relevant clarifying questions, ONE BY ONE.
-2. Do not connect the user until you have asked all 5 questions.
-3. KEEP QUESTIONS SHORT (max 1 sentence).
-4. Be professional and empathetic.
-5. After the 5th answer, ask: "Is there anything else I should know before I connect you?"
-6. Once they answer that final check, end your message with: [PAYMENT_REQUIRED]
-7. PAYMENT RULE: You must explicitly state that the $5 fee is refundable ONLY if the customer is not satisfied with the answer. Do not imply it is automatically refundable.
-"""
-
-
-# ---------- BASIC ROUTES ----------
-@app.route("/")
-def index():
-    return f"Ava Server Running. AI status: {AI_STATUS} (model={AI_MODEL_NAME})"
-
-
-@app.route("/ai-status")
-def ai_status():
-    return jsonify(
-        {
-            "ai_status": AI_STATUS,
-            "ai_model": AI_MODEL_NAME,
-            "ai_error": AI_ERROR,
-            "has_google_api_key_env": bool(GOOGLE_API_KEY),
-        }
-    )
-
-
-@app.route("/create-payment-intent", methods=["POST"])
-def create_payment():
-    print("💰 Payment Intent Requested")
-    if not stripe.api_key:
-        return jsonify({"error": "Server Error: Payment key missing or invalid"}), 500
-
-    try:
-        intent = stripe.PaymentIntent.create(
-            amount=500,  # 500 cents = $5
-            currency="usd",
-            automatic_payment_methods={"enabled": True},
-        )
-        print(f"✅ Stripe Intent Created: {intent.id}")
-        return jsonify({"clientSecret": intent.client_secret})
-    except Exception as e:
-        print(f"❌ Stripe Error: {str(e)}")
-        return jsonify({"error": str(e)}), 403
-
-
-# ---------- SOCKET.IO HANDLERS ----------
-
-@socketio.on("connect")
-def handle_connect():
-    sid = flask_request.sid
-    print
+    # This is here for local testing, but Gunicorn will run the app in production
+    if __name__ == "__main__":
+        port = int(os.environ.get("PORT", 8080))
+        app.run(host="0.0.0.0", port=port)
