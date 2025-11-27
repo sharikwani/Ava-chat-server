@@ -1,4 +1,3 @@
-# --- 1. CRITICAL: Eventlet monkey patch must be FIRST ---
 import eventlet
 eventlet.monkey_patch()
 
@@ -10,7 +9,6 @@ from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
-# Standard Flask app instance
 app = Flask(__name__)
 
 # Secret key for sessions (use env var in production)
@@ -220,3 +218,4 @@ if __name__ == "__main__":
     print(f"Starting Ava server on port {port} ...")
     # For local run: python server.py
     socketio.run(app, host="0.0.0.0", port=port, debug=False)
+
