@@ -2,6 +2,6 @@ flask
 flask-socketio
 eventlet
 gunicorn
-google-generativeai>=0.7.0
+google-generativeai
 stripe
 python-dotenv
