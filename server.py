@@ -76,4 +76,4 @@ if __name__ == "__main__":
     # This ensures the local Flask development server runs on the correct host/port
     # but Gunicorn is used in the Render production environment.
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port
+    app.run(host="0.0.0.0", port=port, debug=True)
