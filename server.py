@@ -1,10 +1,8 @@
-# server.py
+# server.py (Final Fix)
 import eventlet
 eventlet.monkey_patch()
 
 import os
-import time
-import random
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room
@@ -16,7 +14,7 @@ import stripe
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-AGENT_PASSWORD = "admin"  # Simple password for your Agent Dashboard
+AGENT_PASSWORD = "admin" 
 
 genai.configure(api_key=GOOGLE_API_KEY)
 AVA_INSTRUCTIONS = (
@@ -30,7 +28,7 @@ AVA_INSTRUCTIONS = (
     "4. AT THE VERY END of that final message, include: ACTION_TRIGGER_PAYMENT"
 )
 
-# --- MODEL SETUP (Keep your existing auto-select logic) ---
+# --- MODEL SETUP ---
 def setup_model():
     try:
         valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
@@ -53,20 +51,26 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
 
 # --- STORAGE ---
-# In a real app, use a Database. For now, we use memory.
-chat_store = {}  # { user_id: { 'history': [], 'paid': False, 'model_session': obj } }
+chat_store = {} 
 
 @app.route('/')
 def index():
-    return "Ava Custom Chat System is Running!"
+    return "Ava 2.5 (Live Chat Fix) is Running!"
 
 # --- SOCKET LOGIC ---
+
+# 1. CRITICAL FIX: JOIN USER TO ROOM ON CONNECT
+@socketio.on('register')
+def handle_register(data):
+    user_id = data.get('user_id')
+    join_room(user_id)
+    print(f"🔗 User {user_id} registered and joined room.")
 
 @socketio.on('join_as_agent')
 def handle_agent_join(data):
     if data.get('password') == AGENT_PASSWORD:
         join_room('agent_room')
-        # Send all active paid chats to agent immediately
+        # Send active paid chats
         active_chats = []
         for uid, data in chat_store.items():
             if data.get('paid', False):
@@ -80,49 +84,41 @@ def handle_user_message(data):
     
     # Init user if new
     if user_id not in chat_store:
-        chat_store[user_id] = {
-            'history': [], 
-            'paid': False, 
-            'model_session': model.start_chat(history=[])
-        }
-        # Prime older models if needed
+        chat_store[user_id] = {'history': [], 'paid': False, 'model_session': model.start_chat(history=[])}
         if not hasattr(model, '_system_instruction') or not model._system_instruction:
              chat_store[user_id]['model_session'].send_message(AVA_INSTRUCTIONS)
 
-    # Save User Message
     chat_store[user_id]['history'].append({'sender': 'user', 'text': msg_text})
     
-    # join user to their own room so agent can message them
+    # Ensure they are in the room
     join_room(user_id) 
 
-    # IF USER IS PAID -> FORWARD TO AGENT (Human Mode)
+    # IF PAID -> FORWARD TO AGENT
     if chat_store[user_id]['paid']:
-        # Send to Agent Dashboard
         emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='agent_room')
-        return # Stop AI from replying
+        return 
 
-    # IF USER IS NOT PAID -> AI REPLIES (Ava Mode)
-    emit('bot_typing')
-    eventlet.sleep(2.0)
+    # IF NOT PAID -> AVA REPLIES
+    emit('bot_typing', to=user_id)
+    eventlet.sleep(1.5)
     
     try:
         session = chat_store[user_id]['model_session']
         response = session.send_message(msg_text)
         ai_text = response.text
         
-        # Check for Handoff Code
         if "ACTION_TRIGGER_PAYMENT" in ai_text:
             clean_text = ai_text.replace("ACTION_TRIGGER_PAYMENT", "")
             chat_store[user_id]['history'].append({'sender': 'bot', 'text': clean_text})
-            emit('bot_message', {'data': clean_text})
-            emit('payment_trigger')
+            emit('bot_message', {'data': clean_text}, to=user_id)
+            emit('payment_trigger', to=user_id)
         else:
             chat_store[user_id]['history'].append({'sender': 'bot', 'text': ai_text})
-            emit('bot_message', {'data': ai_text})
+            emit('bot_message', {'data': ai_text}, to=user_id)
             
     except Exception as e:
         print(f"AI Error: {e}")
-        emit('bot_message', {'data': "I'm checking on that..."})
+        emit('bot_message', {'data': "I'm checking on that..."}, to=user_id)
 
 @socketio.on('agent_message')
 def handle_agent_reply(data):
@@ -130,34 +126,34 @@ def handle_agent_reply(data):
     text = data.get('message')
     
     if target_user in chat_store:
-        # Save to history
         chat_store[target_user]['history'].append({'sender': 'agent', 'text': text})
-        # Send to specific User
-        emit('bot_message', {'data': text}, to=target_user)
+        # Send to specific User Room
+        emit('bot_message', {'data': text, 'is_agent': True}, to=target_user)
+
+@socketio.on('agent_joined_chat')
+def handle_agent_notify(data):
+    target_user = data.get('to_user')
+    emit('agent_connected', {'name': 'Expert Agent'}, to=target_user)
 
 @socketio.on('mark_paid')
 def handle_payment_confirm(data):
     user_id = data.get('user_id')
+    join_room(user_id) # Ensure they are joined immediately upon return
     if user_id in chat_store:
         chat_store[user_id]['paid'] = True
-        # Notify Agent that a new paid user is ready
-        emit('new_paid_user', {
-            'user_id': user_id, 
-            'history': chat_store[user_id]['history']
-        }, to='agent_room')
+        emit('new_paid_user', {'user_id': user_id, 'history': chat_store[user_id]['history']}, to='agent_room')
 
 # --- STRIPE ---
 @app.route('/create-checkout-session', methods=['POST'])
 def create_checkout_session():
     try:
         data = request.json
-        uid = data.get('userId') # Pass user ID so we know who paid
+        uid = data.get('userId')
         base_url = request.headers.get('Origin', 'https://ava-assistant-api.onrender.com')
-        
         session = stripe.checkout.Session.create(
             line_items=[{'price_data': {'currency': 'usd', 'product_data': {'name': 'Expert Connection'}, 'unit_amount': 500}, 'quantity': 1}],
             mode='payment',
-            success_url=f"{base_url}/?payment_success=true&uid={uid}", # Pass ID back
+            success_url=f"{base_url}/?payment_success=true&uid={uid}",
             cancel_url=f"{base_url}/?payment_canceled=true",
         )
         return jsonify(url=session.url)
