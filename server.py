@@ -22,7 +22,7 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # --- AVA'S UPDATED INSTRUCTIONS ---
-# We tell Ava to ask exactly 5 questions and use a "SECRET CODE" when done.
+# Updated with strict 5-question rule and clarified refund policy
 AVA_INSTRUCTIONS = (
     "You are 'Ava,' a professional, blonde American assistant for 'HelpByExperts.' "
     "Your goal is to gather detailed information before connecting the user to a human expert. "
@@ -31,7 +31,7 @@ AVA_INSTRUCTIONS = (
     "2. Ask exactly 5 relevant follow-up questions, ONE BY ONE, to understand the user's issue deeply. Do not ask them all at once.\n"
     "3. Wait for the user's answer after each question.\n"
     "4. After the user answers your 5th question, you must summarize their issue and say: "
-    "'Thank you. I have gathered all the details. I have identified the perfect expert to solve this immediately. The next step is a secure connection for a fully refundable $5 fee.' "
+    "'Thank you. I have gathered all the details. I have identified the perfect expert to solve this immediately. The next step is a secure connection for a $5 fee, which is fully refundable if the expert cannot solve your problem or if you are unsatisfied.' "
     "5. AT THE VERY END of that final message, you MUST include this exact code: ACTION_TRIGGER_PAYMENT"
 )
 
@@ -61,7 +61,7 @@ def setup_model():
         if "1.5" in chosen_model_name:
             return genai.GenerativeModel(chosen_model_name, system_instruction=AVA_INSTRUCTIONS)
         else:
-            return genai.GenerativeModel(chosen_model_name) # Instructions will need to be passed in chat for older models
+            return genai.GenerativeModel(chosen_model_name)
 
     except Exception:
         return genai.GenerativeModel("gemini-pro")
@@ -79,7 +79,7 @@ chat_sessions = {}
 # --- HEALTH CHECK ---
 @app.route('/')
 def index():
-    return "Ava 2.0 is Running!"
+    return "Ava 2.1 is Running!"
 
 # --- SOCKET.IO CHAT LOGIC ---
 @socketio.on('user_message')
@@ -89,7 +89,7 @@ def handle_user_message(data):
 
     if user_id not in chat_sessions:
         chat_sessions[user_id] = model.start_chat(history=[])
-        # If using older model (no system instruction support), prime it here
+        # If using older model, prime it here
         if not hasattr(model, '_system_instruction') or not model._system_instruction:
              chat_sessions[user_id].send_message(AVA_INSTRUCTIONS)
     
@@ -98,9 +98,9 @@ def handle_user_message(data):
     # 1. SHOW TYPING INDICATOR
     emit('bot_typing') 
 
-    # 2. REALISTIC DELAY (3 to 5 seconds)
-    # This keeps the "Ava is typing..." bubble on screen
-    time_to_sleep = random.uniform(3.0, 5.0)
+    # 2. FASTER DELAY (Fixed to max 3 seconds)
+    # Changed to uniform random between 2.0 and 3.0 seconds
+    time_to_sleep = random.uniform(2.0, 3.0)
     eventlet.sleep(time_to_sleep) 
 
     try:
@@ -110,12 +110,10 @@ def handle_user_message(data):
         
         # 4. CHECK FOR SECRET CODE
         if "ACTION_TRIGGER_PAYMENT" in text_response:
-            # Remove the code so the user doesn't see it
             clean_text = text_response.replace("ACTION_TRIGGER_PAYMENT", "")
             emit('bot_message', {'data': clean_text})
-            emit('payment_trigger') # <--- OPENS THE MODAL
+            emit('payment_trigger') 
         else:
-            # Normal conversation
             emit('bot_message', {'data': text_response})
 
     except Exception as e:
