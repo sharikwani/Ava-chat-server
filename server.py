@@ -161,30 +161,4 @@ def create_payment():
 @socketio.on("connect")
 def handle_connect():
     sid = flask_request.sid
-    print(f"[SocketIO] Client connected: {sid}")
-
-    # init AI history
-    chat_histories[sid] = [
-        {"role": "user", "parts": [SYSTEM_INSTRUCTION]},
-        {"role": "model", "parts": ["Understood. I will ask 5 questions."]},
-    ]
-
-    # init fallback state
-    fallback_state[sid] = {"step": 0, "done": False}
-
-    emit(
-        "bot_message",
-        {
-            "data": "Hi! I'm Ava. I can connect you with a verified expert. "
-                    "What problem are you facing today?"
-        },
-    )
-
-
-@socketio.on("disconnect")
-def handle_disconnect():
-    sid = flask_request.sid
-    if sid in chat_histories:
-        del chat_histories[sid]
-    if sid in fallback_state:
-        del fallback_state_
+    print
