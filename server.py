@@ -7,7 +7,7 @@ eventlet.monkey_patch()
 import os
 import time
 import random
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -21,8 +21,7 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 # 3. Configure Google Gemini
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# --- AVA'S UPDATED INSTRUCTIONS ---
-# Updated with strict 5-question rule and clarified refund policy
+# --- AVA'S INSTRUCTIONS ---
 AVA_INSTRUCTIONS = (
     "You are 'Ava,' a professional, blonde American assistant for 'HelpByExperts.' "
     "Your goal is to gather detailed information before connecting the user to a human expert. "
@@ -48,7 +47,6 @@ def setup_model():
             return genai.GenerativeModel("gemini-pro")
 
         chosen_model_name = valid_models[0]
-        # Prefer 1.5 Flash or Pro
         for name in valid_models:
             if "flash" in name and "1.5" in name:
                 chosen_model_name = name
@@ -79,7 +77,7 @@ chat_sessions = {}
 # --- HEALTH CHECK ---
 @app.route('/')
 def index():
-    return "Ava 2.1 is Running!"
+    return "Ava 2.2 (Stripe Checkout Edition) is Running!"
 
 # --- SOCKET.IO CHAT LOGIC ---
 @socketio.on('user_message')
@@ -89,26 +87,20 @@ def handle_user_message(data):
 
     if user_id not in chat_sessions:
         chat_sessions[user_id] = model.start_chat(history=[])
-        # If using older model, prime it here
         if not hasattr(model, '_system_instruction') or not model._system_instruction:
              chat_sessions[user_id].send_message(AVA_INSTRUCTIONS)
     
     chat = chat_sessions[user_id]
-    
-    # 1. SHOW TYPING INDICATOR
     emit('bot_typing') 
 
-    # 2. FASTER DELAY (Fixed to max 3 seconds)
-    # Changed to uniform random between 2.0 and 3.0 seconds
+    # Typing delay
     time_to_sleep = random.uniform(2.0, 3.0)
     eventlet.sleep(time_to_sleep) 
 
     try:
-        # 3. GET AI RESPONSE
         response = chat.send_message(message)
         text_response = response.text
         
-        # 4. CHECK FOR SECRET CODE
         if "ACTION_TRIGGER_PAYMENT" in text_response:
             clean_text = text_response.replace("ACTION_TRIGGER_PAYMENT", "")
             emit('bot_message', {'data': clean_text})
@@ -120,16 +112,37 @@ def handle_user_message(data):
         print(f"AI Error: {e}")
         emit('bot_message', {'data': "I'm checking on that... (Connection blip, please type again)."})
 
-# --- STRIPE PAYMENT ---
-@app.route('/create-payment-intent', methods=['POST'])
-def create_payment():
+# --- NEW: STRIPE CHECKOUT SESSION ---
+@app.route('/create-checkout-session', methods=['POST'])
+def create_checkout_session():
     try:
-        intent = stripe.PaymentIntent.create(
-            amount=500, currency='usd', automatic_payment_methods={'enabled': True},
+        # We determine the URL of your frontend so we know where to redirect back to
+        # If running locally or on a different domain, this 'Origin' header helps us find home.
+        # Fallback to your Render URL if Origin is missing.
+        base_url = request.headers.get('Origin', 'https://ava-assistant-api.onrender.com')
+
+        session = stripe.checkout.Session.create(
+            line_items=[
+                {
+                    'price_data': {
+                        'currency': 'usd',
+                        'product_data': {
+                            'name': 'Expert Connection Fee',
+                            'description': 'Fully refundable if unsatisfied',
+                        },
+                        'unit_amount': 500, # $5.00
+                    },
+                    'quantity': 1,
+                },
+            ],
+            mode='payment',
+            # Redirect back to your site with a success flag
+            success_url=f"{base_url}/?payment_success=true",
+            cancel_url=f"{base_url}/?payment_canceled=true",
         )
-        return jsonify(clientSecret=intent.client_secret)
+        return jsonify(url=session.url)
     except Exception as e:
-        return jsonify(error={'message': str(e)}), 403
+        return jsonify(error=str(e)), 500
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
