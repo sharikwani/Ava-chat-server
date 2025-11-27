@@ -1,3 +1,4 @@
+# --- 1. CRITICAL: Eventlet monkey patch must be FIRST ---
 import eventlet
 eventlet.monkey_patch()
 
@@ -9,6 +10,7 @@ from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
+# Standard Flask app instance
 app = Flask(__name__)
 
 # Secret key for sessions (use env var in production)
@@ -27,7 +29,11 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # --- GEMINI / GOOGLE AI CONFIG ---
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+
 model = None
+AI_STATUS = "Initializing"
+AI_ERROR = None
+AI_MODEL_NAME = None
 
 
 def configure_robust_ai():
@@ -35,8 +41,12 @@ def configure_robust_ai():
     Configure the Gemini client and pick a working model.
     If anything fails, return None and keep the server running.
     """
+    global AI_STATUS, AI_ERROR, AI_MODEL_NAME
+
     if not GOOGLE_API_KEY:
-        print("FATAL: GOOGLE_API_KEY not found. AI will be offline.")
+        AI_STATUS = "Offline"
+        AI_ERROR = "GOOGLE_API_KEY environment variable is missing"
+        print("[AI] FATAL: GOOGLE_API_KEY not found. AI will be offline.")
         return None
 
     try:
@@ -59,15 +69,25 @@ def configure_robust_ai():
                 resp = test_model.generate_content("ping")
                 # If we got here without exception, we assume it's fine
                 print(f"[AI] SUCCESS: Using model '{name}'")
+                AI_STATUS = "Online"
+                AI_ERROR = None
+                AI_MODEL_NAME = name
                 return test_model
             except Exception as e:
                 print(f"[AI] Failed model '{name}': {e}")
+                AI_STATUS = "Degraded"
+                AI_ERROR = f"Last failed model: {name} – {e}"
 
         print("[AI] ALL MODELS FAILED. AI is OFFLINE.")
+        AI_STATUS = "Offline"
+        if not AI_ERROR:
+            AI_ERROR = "All candidate models failed."
         return None
 
     except Exception as e:
         print(f"[AI] FATAL AI CLIENT ERROR: {e}")
+        AI_STATUS = "Offline"
+        AI_ERROR = f"Fatal AI client error: {e}"
         return None
 
 
@@ -95,8 +115,24 @@ RULES:
 # --- BASIC HEALTH CHECK ROUTE ---
 @app.route("/")
 def index():
-    ai_status = "Online" if model else "Offline"
-    return f"Ava Server Running. AI status: {ai_status}"
+    return f"Ava Server Running. AI status: {AI_STATUS} (model={AI_MODEL_NAME})"
+
+
+# --- AI STATUS DEBUG ROUTE ---
+@app.route("/ai-status")
+def ai_status():
+    """
+    Small debug endpoint so you can see from the browser WHY AI is offline.
+    Does not expose secret keys, only status text.
+    """
+    return jsonify(
+        {
+            "ai_status": AI_STATUS,
+            "ai_model": AI_MODEL_NAME,
+            "ai_error": AI_ERROR,
+            "has_google_api_key_env": bool(GOOGLE_API_KEY),
+        }
+    )
 
 
 # --- STRIPE PAYMENT INTENT ROUTE ---
@@ -193,6 +229,9 @@ def handle_user_message(data):
             else:
                 emit("bot_message", {"data": ai_reply})
         else:
+            # Use AI_ERROR to tell you (the owner) what’s wrong, but keep
+            # message generic for user.
+            print(f"[AI] model is None. Status={AI_STATUS}, Error={AI_ERROR}")
             emit(
                 "bot_message",
                 {
@@ -218,4 +257,3 @@ if __name__ == "__main__":
     print(f"Starting Ava server on port {port} ...")
     # For local run: python server.py
     socketio.run(app, host="0.0.0.0", port=port, debug=False)
-
