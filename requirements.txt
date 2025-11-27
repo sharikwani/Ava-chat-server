@@ -1,7 +1,7 @@
-flask
-flask-socketio
-flask-cors
-eventlet
-stripe
-google-generativeai
-gunicorn
+flask==3.0.3
+flask-socketio==5.3.6
+flask-cors==4.0.1
+eventlet==0.36.1
+stripe==10.10.0
+google-generativeai==0.8.3
+gunicorn==23.0.0
