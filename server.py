@@ -19,7 +19,7 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 # 3. Configure Google Gemini
 genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel(
-    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest", # OR use "gemini-pro" if this still fails
     system_instruction="You are 'Ava,' a helpful, polite, and efficient AI assistant for 'HelpByExperts,' a service that connects users to human professionals (Doctors, Lawyers, Mechanics, etc.) for a $5 fee. Your primary goal is to identify the user's issue and determine the correct category. After determining the category and summarizing the issue, you MUST respond by telling the user: 'I have identified the right expert for your issue. The next step is a quick, secure connection for a $5 fee, which is fully refundable if you're not satisfied.' and then emit the payment token. You must only do this ONCE after 2-3 user messages. Start with a friendly greeting."
 )
 
@@ -84,3 +84,4 @@ def create_payment():
 # --- RUN SERVER ---
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
+
