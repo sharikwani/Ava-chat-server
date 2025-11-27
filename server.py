@@ -5,6 +5,8 @@ import eventlet
 eventlet.monkey_patch()
 
 import os
+import time
+import random
 from flask import Flask, jsonify
 from flask_socketio import SocketIO, emit
 from dotenv import load_dotenv
@@ -19,37 +21,34 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 # 3. Configure Google Gemini
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# --- AVA'S INSTRUCTIONS ---
+# --- AVA'S UPDATED INSTRUCTIONS ---
+# We tell Ava to ask exactly 5 questions and use a "SECRET CODE" when done.
 AVA_INSTRUCTIONS = (
-    "You are 'Ava,' a helpful, polite, and efficient AI assistant for 'HelpByExperts,' "
-    "a service that connects users to human professionals (Doctors, Lawyers, Mechanics, etc.) for a $5 fee. "
-    "Your primary goal is to identify the user's issue and determine the correct category. "
-    "After determining the category and summarizing the issue, you MUST respond by telling the user: "
-    "'I have identified the right expert for your issue. The next step is a quick, secure connection for a $5 fee, which is fully refundable if you're not satisfied.' "
-    "and then emit the payment token. You must only do this ONCE after 2-3 user messages. "
-    "Start with a friendly greeting."
+    "You are 'Ava,' a professional, blonde American assistant for 'HelpByExperts.' "
+    "Your goal is to gather detailed information before connecting the user to a human expert. "
+    "You MUST follow this strict process:\n"
+    "1. Start with a friendly, professional greeting.\n"
+    "2. Ask exactly 5 relevant follow-up questions, ONE BY ONE, to understand the user's issue deeply. Do not ask them all at once.\n"
+    "3. Wait for the user's answer after each question.\n"
+    "4. After the user answers your 5th question, you must summarize their issue and say: "
+    "'Thank you. I have gathered all the details. I have identified the perfect expert to solve this immediately. The next step is a secure connection for a fully refundable $5 fee.' "
+    "5. AT THE VERY END of that final message, you MUST include this exact code: ACTION_TRIGGER_PAYMENT"
 )
 
 # --- SMART MODEL DISCOVERY ---
 def setup_model():
-    print("--- 🔍 DIAGNOSTIC: Listing available models for this API Key ---")
+    print("--- 🤖 AVA INITIALIZATION: Searching for a working AI model ---")
     try:
-        # Ask Google what models are actually available to us
         valid_models = []
         for m in genai.list_models():
-            # We only want models that generate content (chat)
             if 'generateContent' in m.supported_generation_methods:
-                print(f"   found valid model: {m.name}")
                 valid_models.append(m.name)
         
         if not valid_models:
-            print("❌ CRITICAL: No text generation models found for this API Key/Region.")
-            # Fallback to a safe default just in case
             return genai.GenerativeModel("gemini-pro")
 
-        # Logic: Prefer 'flash', then '1.5', then whatever is available
-        chosen_model_name = valid_models[0] # Default to the first one found
-        
+        chosen_model_name = valid_models[0]
+        # Prefer 1.5 Flash or Pro
         for name in valid_models:
             if "flash" in name and "1.5" in name:
                 chosen_model_name = name
@@ -59,19 +58,14 @@ def setup_model():
         
         print(f"✅ SUCCESS! Auto-selected model: {chosen_model_name}")
 
-        # Note: Older models (1.0) crash with 'system_instruction', newer ones (1.5) need it.
         if "1.5" in chosen_model_name:
             return genai.GenerativeModel(chosen_model_name, system_instruction=AVA_INSTRUCTIONS)
         else:
-            print("⚠️ Using legacy model (no system instruction supported)")
-            # For older models, we prepend instructions to the history instead
-            return genai.GenerativeModel(chosen_model_name)
+            return genai.GenerativeModel(chosen_model_name) # Instructions will need to be passed in chat for older models
 
-    except Exception as e:
-        print(f"❌ MODEL SETUP ERROR: {e}")
-        return genai.GenerativeModel("gemini-pro") # Absolute backup
+    except Exception:
+        return genai.GenerativeModel("gemini-pro")
 
-# Initialize the model dynamically
 model = setup_model()
 
 # 4. Initialize Flask App
@@ -80,13 +74,12 @@ app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'default_secret_key')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
 
-# In-memory storage for chat history
 chat_sessions = {}
 
-# --- HEALTH CHECK ROUTE ---
+# --- HEALTH CHECK ---
 @app.route('/')
 def index():
-    return "Ava Chat Server is Running!"
+    return "Ava 2.0 is Running!"
 
 # --- SOCKET.IO CHAT LOGIC ---
 @socketio.on('user_message')
@@ -96,42 +89,49 @@ def handle_user_message(data):
 
     if user_id not in chat_sessions:
         chat_sessions[user_id] = model.start_chat(history=[])
+        # If using older model (no system instruction support), prime it here
+        if not hasattr(model, '_system_instruction') or not model._system_instruction:
+             chat_sessions[user_id].send_message(AVA_INSTRUCTIONS)
     
     chat = chat_sessions[user_id]
+    
+    # 1. SHOW TYPING INDICATOR
     emit('bot_typing') 
 
+    # 2. REALISTIC DELAY (3 to 5 seconds)
+    # This keeps the "Ava is typing..." bubble on screen
+    time_to_sleep = random.uniform(3.0, 5.0)
+    eventlet.sleep(time_to_sleep) 
+
     try:
-        # Generate Response
+        # 3. GET AI RESPONSE
         response = chat.send_message(message)
-        emit('bot_message', {'data': response.text})
+        text_response = response.text
         
-        # Simple Handoff Check (After response to ensure flow)
-        if len(chat.history) >= 6:
-            # Check if we recently mentioned the expert
-            last_text = chat.history[-1].parts[0].text
-            if "identified the right expert" not in last_text:
-                 # Force the handoff message if the AI didn't say it naturally
-                 pass 
-                 # (You can enable the forced message here if needed, 
-                 # but let's get basic chat working first)
+        # 4. CHECK FOR SECRET CODE
+        if "ACTION_TRIGGER_PAYMENT" in text_response:
+            # Remove the code so the user doesn't see it
+            clean_text = text_response.replace("ACTION_TRIGGER_PAYMENT", "")
+            emit('bot_message', {'data': clean_text})
+            emit('payment_trigger') # <--- OPENS THE MODAL
+        else:
+            # Normal conversation
+            emit('bot_message', {'data': text_response})
 
     except Exception as e:
-        print(f"runtime AI Error: {e}")
-        emit('bot_message', {'data': "I'm sorry, I'm having trouble connecting to the system right now. Please try again."})
+        print(f"AI Error: {e}")
+        emit('bot_message', {'data': "I'm checking on that... (Connection blip, please type again)."})
 
-# --- STRIPE PAYMENT ENDPOINT ---
+# --- STRIPE PAYMENT ---
 @app.route('/create-payment-intent', methods=['POST'])
 def create_payment():
     try:
         intent = stripe.PaymentIntent.create(
-            amount=500,  
-            currency='usd',
-            automatic_payment_methods={'enabled': True},
+            amount=500, currency='usd', automatic_payment_methods={'enabled': True},
         )
         return jsonify(clientSecret=intent.client_secret)
     except Exception as e:
         return jsonify(error={'message': str(e)}), 403
 
-# --- RUN SERVER ---
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
