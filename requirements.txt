@@ -1,7 +1,7 @@
-# requirements.txt
-flask        # Or fastapi, depending on your choice
-gunicorn     # Production WSGI server to run your Python app
-socketio     # Python Socket.IO library
-python-dotenv
+flask
+flask-socketio
+eventlet
+gunicorn
 openai
 stripe
+python-dotenv
