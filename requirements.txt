@@ -6,4 +6,5 @@ gunicorn
 google-generativeai
 stripe
 python-dotenv
-pip install firebase-admin
+install firebase-admin
+
