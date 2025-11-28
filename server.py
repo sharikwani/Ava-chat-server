@@ -21,9 +21,9 @@ from firebase_admin import credentials, firestore
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-AGENT_PASSWORD = "admin"  # Change this for production security
+AGENT_PASSWORD = "admin" 
 
-# --- FIREBASE SETUP (SECURE ENV VAR) ---
+# --- FIREBASE SETUP ---
 firebase_db = None
 try:
     encoded_creds = os.getenv("FIREBASE_CREDENTIALS")
@@ -32,28 +32,34 @@ try:
         cred = credentials.Certificate(creds_json)
         firebase_admin.initialize_app(cred)
         firebase_db = firestore.client()
-        print("✅ Firebase Admin Connected via Environment Variable")
+        print("✅ Firebase Admin Connected")
     else:
-        print("⚠️ FIREBASE_CREDENTIALS not found. Chat history won't sync to Account Dashboard.")
+        print("⚠️ FIREBASE_CREDENTIALS not found.")
 except Exception as e:
     print(f"⚠️ Firebase Error: {e}")
 
-# --- AI SETUP ---
+# --- AI SETUP (THE NEW BRAIN) ---
 genai.configure(api_key=GOOGLE_API_KEY)
+
+# CRITICAL UPDATE: THE "NO ADVICE" INTAKE SCRIPT
 AVA_INSTRUCTIONS = (
-    "You are 'Ava,' a professional, blonde American assistant for 'HelpByExperts.' "
-    "Your goal is to gather detailed information before connecting the user to a human expert. "
-    "You MUST follow this strict process:\n"
-    "1. Start with a friendly, professional greeting.\n"
-    "2. Ask exactly 5 relevant follow-up questions, ONE BY ONE, to understand the user's issue deeply. Do not ask them all at once.\n"
-    "3. Wait for the user's answer after each question.\n"
-    "4. After the 5th answer, summarize and say: "
-    "'Thank you. I have gathered all the details. I have identified the perfect expert to solve this immediately. The next step is a secure connection for a $5 fee, which is fully refundable if the expert cannot solve your problem or if you are unsatisfied.' "
-    "5. AT THE VERY END of that final message, you MUST include this exact code: ACTION_TRIGGER_PAYMENT"
+    "You are 'Ava,' the Intake Specialist for 'HelpByExperts.' "
+    "Your role is to gather details and contact info for the Human Expert. "
+    "You are NOT the expert. You MUST NOT give technical advice, diagnoses, or solutions. "
+    "If a user asks for a specific fix, say: 'That is something our certified expert will need to confirm to ensure it is done safely.' "
+    "\n\n"
+    "STRICT CONVERSATION FLOW (Do not skip steps):"
+    "1. Greet the user and ask what issue they are facing."
+    "2. Ask 1 relevant follow-up question about symptoms (e.g., 'How long has this been happening?' or 'Are there any error codes?')."
+    "3. Say: 'I need to start a case file for the expert. What is your Full Name?'"
+    "4. Wait for answer. Then ask: 'Thank you. What is the best Email Address to send the chat transcript to?'"
+    "5. Wait for answer. Then ask: 'And a Phone Number in case we get disconnected?'"
+    "6. Once you have the Name, Email, and Phone, say: "
+    "'Thank you. I have captured all the details. This sounds like a specific issue that requires a certified professional to resolve. I have an expert available right now to guide you. The connection fee is a fully refundable $5.' "
+    "7. END your final message with exactly: ACTION_TRIGGER_PAYMENT"
 )
 
 def setup_model():
-    print("--- 🤖 AVA INITIALIZATION: Searching for a working AI model ---")
     try:
         valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if not valid_models: return genai.GenerativeModel("gemini-pro")
@@ -77,7 +83,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
 
-# --- LOCAL DATABASE (SQLite) ---
+# --- DATABASE ---
 DB_FILE = "chat_data.db"
 
 def init_db():
@@ -108,24 +114,25 @@ def save_chat(user_id, history, paid):
     conn.commit()
     conn.close()
 
-# --- FIREBASE SYNC HELPER ---
+# --- FIREBASE SYNC ---
 def sync_chat_to_firebase(user_id, history):
     if firebase_db:
         try:
+            # Extract contact info from history if possible (basic parsing)
+            # This saves the whole chat so the Agent sees the Name/Phone provided to Ava
             firebase_db.collection('chats').add({
                 'user_id': user_id,
                 'history': history,
                 'timestamp': firestore.SERVER_TIMESTAMP,
                 'status': 'paid'
             })
-            print(f"✅ Firebase: Chat synced for {user_id}")
         except Exception as e:
             print(f"❌ Firebase Sync Error: {e}")
 
 # --- ROUTES ---
 @app.route('/')
 def index():
-    return "Ava Pro Server (Memory Fixed) is Running!"
+    return "Ava Pro Server (Intake Specialist Mode) is Running!"
 
 # --- SOCKET EVENTS ---
 
@@ -154,47 +161,38 @@ def handle_user_message(data):
     user_id = data.get('user_id')
     msg_text = data.get('message')
     
-    # 1. Load Chat Data
     chat_data = get_chat(user_id)
     if not chat_data:
         chat_data = {'history': [], 'paid': False}
     
-    # 2. Save New User Message
     chat_data['history'].append({'sender': 'user', 'text': msg_text})
     save_chat(user_id, chat_data['history'], chat_data['paid'])
     
     join_room(user_id)
 
-    # 3. HUMAN MODE (If Paid)
+    # HUMAN MODE
     if chat_data['paid']:
         emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='agent_room')
         return
 
-    # 4. AI MODE (If Not Paid)
+    # AI MODE (Ava)
     emit('bot_typing', to=user_id)
-    eventlet.sleep(1.0) 
+    eventlet.sleep(1.5) 
     
     try:
-        # --- RECONSTRUCT HISTORY FOR MEMORY ---
+        # MEMORY RECONSTRUCTION
         gemini_history = []
         for msg in chat_data['history']:
-            # Skip the very last message (we send it next)
-            if msg == chat_data['history'][-1]:
-                continue
-            
+            if msg['text'] == msg_text and msg is chat_data['history'][-1]: continue
             if msg['sender'] == 'user':
                 gemini_history.append({'role': 'user', 'parts': [msg['text']]})
             elif msg['sender'] == 'bot':
                 gemini_history.append({'role': 'model', 'parts': [msg['text']]})
         
-        # Start Chat with History
         ai_chat = model.start_chat(history=gemini_history)
-        
-        # Send Message
         response = ai_chat.send_message(msg_text)
         ai_text = response.text
         
-        # Check for Handoff
         if "ACTION_TRIGGER_PAYMENT" in ai_text:
             clean_text = ai_text.replace("ACTION_TRIGGER_PAYMENT", "")
             chat_data['history'].append({'sender': 'bot', 'text': clean_text})
@@ -208,7 +206,7 @@ def handle_user_message(data):
             
     except Exception as e:
         print(f"AI Error: {e}")
-        emit('bot_message', {'data': "I see. Could you tell me a bit more about that?"}, to=user_id)
+        emit('bot_message', {'data': "I'm noting that down. Could you verify?"}, to=user_id)
 
 @socketio.on('agent_message')
 def handle_agent_reply(data):
@@ -239,14 +237,9 @@ def handle_payment_confirm(data):
     if chat_data:
         chat_data['paid'] = True
         save_chat(user_id, chat_data['history'], True)
-        
-        # Notify Agent
         emit('new_paid_user', {'user_id': user_id, 'history': chat_data['history']}, to='agent_room')
-        
-        # Sync to Firebase
         sync_chat_to_firebase(user_id, chat_data['history'])
 
-# --- STRIPE CHECKOUT ---
 @app.route('/create-checkout-session', methods=['POST'])
 def create_checkout_session():
     try:
