@@ -1,6 +1,5 @@
-# 1. MONKEY PATCH MUST BE FIRST
 import eventlet
-eventlet.monkey_patch()
+# eventlet.monkey_patch()  <-- REMOVED/COMMENTED OUT
 
 import os
 import time
@@ -266,3 +265,4 @@ def create_checkout_session():
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
+
