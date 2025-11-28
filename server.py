@@ -1,5 +1,6 @@
+# 1. MONKEY PATCH MUST BE FIRST
 import eventlet
-# eventlet.monkey_patch()  <-- REMOVED/COMMENTED OUT
+eventlet.monkey_patch()
 
 import os
 import time
