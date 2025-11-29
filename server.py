@@ -10,7 +10,7 @@ import json
 import base64
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from flask_socketio import SocketIO, emit, join_room
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from dotenv import load_dotenv
 import google.generativeai as genai
 import stripe
@@ -21,6 +21,8 @@ from firebase_admin import credentials, firestore
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+# REPLACE THIS WITH YOUR ACTUAL FRONTEND URL (Where the user should go after paying)
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://www.helpbyexperts.com/account.html") 
 AGENT_PASSWORD = "admin" 
 
 # --- FIREBASE SETUP ---
@@ -34,14 +36,17 @@ try:
         firebase_db = firestore.client()
         print("✅ Firebase Admin Connected")
     else:
-        print("⚠️ FIREBASE_CREDENTIALS not found.")
+        # Fallback for local testing if using file
+        cred = credentials.Certificate("firebase-adminsdk.json")
+        firebase_admin.initialize_app(cred)
+        firebase_db = firestore.client()
+        print("✅ Firebase Admin Connected (Local File)")
 except Exception as e:
     print(f"⚠️ Firebase Error: {e}")
 
-# --- AI SETUP (THE NEW BRAIN) ---
+# --- AI SETUP ---
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# CRITICAL UPDATE: THE "NO ADVICE" INTAKE SCRIPT
 AVA_INSTRUCTIONS = (
     "You are 'Ava,' the Intake Specialist for 'HelpByExperts.' "
     "Your role is to gather details and contact info for the Human Expert. "
@@ -50,7 +55,7 @@ AVA_INSTRUCTIONS = (
     "\n\n"
     "STRICT CONVERSATION FLOW (Do not skip steps):"
     "1. Greet the user and ask what issue they are facing."
-    "2. Ask 1 relevant follow-up question about symptoms (e.g., 'How long has this been happening?' or 'Are there any error codes?')."
+    "2. Ask 1 relevant follow-up question about symptoms."
     "3. Say: 'I need to start a case file for the expert. What is your Full Name?'"
     "4. Wait for answer. Then ask: 'Thank you. What is the best Email Address to send the chat transcript to?'"
     "5. Wait for answer. Then ask: 'And a Phone Number in case we get disconnected?'"
@@ -61,18 +66,9 @@ AVA_INSTRUCTIONS = (
 
 def setup_model():
     try:
-        valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        if not valid_models: return genai.GenerativeModel("gemini-pro")
-        
-        chosen = valid_models[0]
-        for name in valid_models:
-            if "flash" in name and "1.5" in name: chosen = name; break
-            elif "1.5" in name: chosen = name
-            
-        print(f"✅ AI Connected: {chosen}")
-        if "1.5" in chosen: return genai.GenerativeModel(chosen, system_instruction=AVA_INSTRUCTIONS)
-        return genai.GenerativeModel(chosen)
-    except: return genai.GenerativeModel("gemini-pro")
+        return genai.GenerativeModel("gemini-1.5-flash", system_instruction=AVA_INSTRUCTIONS)
+    except:
+        return genai.GenerativeModel("gemini-pro")
 
 model = setup_model()
 
@@ -83,9 +79,8 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
 
-# --- DATABASE ---
+# --- DATABASE (LOCAL LOGS) ---
 DB_FILE = "chat_data.db"
-
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -93,159 +88,160 @@ def init_db():
                  (user_id TEXT PRIMARY KEY, history TEXT, paid BOOLEAN)''')
     conn.commit()
     conn.close()
-
 init_db()
 
-def get_chat(user_id):
+def save_local_log(user_id, sender, text):
+    """Simple local backup of messages"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    # Get existing
     c.execute("SELECT history, paid FROM chats WHERE user_id=?", (user_id,))
     row = c.fetchone()
-    conn.close()
+    
+    history = []
+    paid = False
     if row:
-        return {'history': json.loads(row[0]), 'paid': row[1]}
-    return None
-
-def save_chat(user_id, history, paid):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
+        history = json.loads(row[0])
+        paid = row[1]
+    
+    history.append({'sender': sender, 'text': text})
+    
     c.execute("INSERT OR REPLACE INTO chats (user_id, history, paid) VALUES (?, ?, ?)", 
               (user_id, json.dumps(history), paid))
     conn.commit()
     conn.close()
 
-# --- FIREBASE SYNC ---
-def sync_chat_to_firebase(user_id, history):
-    if firebase_db:
-        try:
-            # Extract contact info from history if possible (basic parsing)
-            # This saves the whole chat so the Agent sees the Name/Phone provided to Ava
-            firebase_db.collection('chats').add({
-                'user_id': user_id,
-                'history': history,
-                'timestamp': firestore.SERVER_TIMESTAMP,
-                'status': 'paid'
-            })
-        except Exception as e:
-            print(f"❌ Firebase Sync Error: {e}")
-
-# --- ROUTES ---
-@app.route('/')
-def index():
-    return "Ava Pro Server (Intake Specialist Mode) is Running!"
+# --- HELPER: CHECK IF HUMAN IS LIVE ---
+def is_human_live(user_id):
+    """Checks Firestore to see if Agent accepted the chat"""
+    if not firebase_db: return False
+    try:
+        # 1. Get User's Active Session ID
+        user_doc = firebase_db.collection('users').document(user_id).get()
+        if user_doc.exists:
+            data = user_doc.to_dict()
+            session_id = data.get('activeSessionId')
+            
+            # 2. Check that Session's Status
+            if session_id:
+                chat_doc = firebase_db.collection('chats').document(session_id).get()
+                if chat_doc.exists and chat_doc.to_dict().get('status') == 'live':
+                    return True
+    except Exception as e:
+        print(f"Error checking status: {e}")
+    return False
 
 # --- SOCKET EVENTS ---
 
 @socketio.on('register')
 def handle_register(data):
     user_id = data.get('user_id')
-    join_room(user_id)
-    chat_data = get_chat(user_id)
-    if chat_data and chat_data['paid']:
-        emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='agent_room')
-
-@socketio.on('join_as_agent')
-def handle_agent_join(data):
-    if data.get('password') == AGENT_PASSWORD:
-        join_room('agent_room')
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT user_id, history FROM chats WHERE paid=1")
-        rows = c.fetchall()
-        conn.close()
-        active_chats = [{'user_id': r[0], 'history': json.loads(r[1])} for r in rows]
-        emit('agent_init_data', active_chats)
+    join_room(user_id) # Join User Room
+    print(f"User connected: {user_id}")
 
 @socketio.on('user_message')
 def handle_user_message(data):
     user_id = data.get('user_id')
     msg_text = data.get('message')
     
-    chat_data = get_chat(user_id)
-    if not chat_data:
-        chat_data = {'history': [], 'paid': False}
+    # 1. Save Local Log
+    save_local_log(user_id, 'user', msg_text)
     
-    chat_data['history'].append({'sender': 'user', 'text': msg_text})
-    save_chat(user_id, chat_data['history'], chat_data['paid'])
-    
-    join_room(user_id)
-
-    # HUMAN MODE
-    if chat_data['paid']:
-        emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='agent_room')
+    # 2. THE SWITCHBOARD LOGIC
+    # Check if this user is currently talking to a Human Agent
+    if is_human_live(user_id):
+        # SKIP AI. Send directly to Agent Dashboard.
+        # We emit to the user_id room. The Agent joined this room via 'agent_join'
+        emit('new_message_for_agent', {
+            'text': msg_text,
+            'user_id': user_id,
+            'sender': 'user'
+        }, room=user_id) 
         return
 
-    # AI MODE (Ava)
+    # 3. AI MODE (Ava)
     emit('bot_typing', to=user_id)
-    eventlet.sleep(1.5) 
+    eventlet.sleep(1) 
     
     try:
-        # MEMORY RECONSTRUCTION
-        gemini_history = []
-        for msg in chat_data['history']:
-            if msg['text'] == msg_text and msg is chat_data['history'][-1]: continue
-            if msg['sender'] == 'user':
-                gemini_history.append({'role': 'user', 'parts': [msg['text']]})
-            elif msg['sender'] == 'bot':
-                gemini_history.append({'role': 'model', 'parts': [msg['text']]})
+        # Reconstruct History for Context (Basic)
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT history FROM chats WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+        conn.close()
         
+        gemini_history = []
+        if row:
+            raw_hist = json.loads(row[0])
+            for msg in raw_hist[-10:]: # Context window 10
+                if msg['sender'] == 'user': gemini_history.append({'role': 'user', 'parts': [msg['text']]})
+                elif msg['sender'] == 'bot': gemini_history.append({'role': 'model', 'parts': [msg['text']]})
+
         ai_chat = model.start_chat(history=gemini_history)
         response = ai_chat.send_message(msg_text)
         ai_text = response.text
         
         if "ACTION_TRIGGER_PAYMENT" in ai_text:
             clean_text = ai_text.replace("ACTION_TRIGGER_PAYMENT", "")
-            chat_data['history'].append({'sender': 'bot', 'text': clean_text})
-            save_chat(user_id, chat_data['history'], chat_data['paid'])
+            save_local_log(user_id, 'bot', clean_text)
             emit('bot_message', {'data': clean_text}, to=user_id)
             emit('payment_trigger', to=user_id)
         else:
-            chat_data['history'].append({'sender': 'bot', 'text': ai_text})
-            save_chat(user_id, chat_data['history'], chat_data['paid'])
+            save_local_log(user_id, 'bot', ai_text)
             emit('bot_message', {'data': ai_text}, to=user_id)
             
     except Exception as e:
         print(f"AI Error: {e}")
-        emit('bot_message', {'data': "I'm noting that down. Could you verify?"}, to=user_id)
+        emit('bot_message', {'data': "I'm connecting..."}, to=user_id)
+
+# --- AGENT EVENTS ---
+
+@socketio.on('agent_join')
+def handle_agent_join(data):
+    """Agent accepts a chat and enters the room"""
+    target_user_id = data.get('target_user_id')
+    join_room(target_user_id) # Agent enters the User's room
+    print(f"Agent joined room: {target_user_id}")
+    emit('agent_status', {'status': 'connected'}, to=target_user_id)
 
 @socketio.on('agent_message')
-def handle_agent_reply(data):
-    target_user = data.get('to_user')
-    text = data.get('message')
-    chat_data = get_chat(target_user)
-    if chat_data:
-        chat_data['history'].append({'sender': 'agent', 'text': text})
-        save_chat(target_user, chat_data['history'], chat_data['paid'])
-        emit('bot_message', {'data': text, 'is_agent': True}, to=target_user)
-
-@socketio.on('agent_typing')
-def handle_agent_typing(data):
-    target_user = data.get('to_user')
-    emit('bot_typing', to=target_user)
-
-@socketio.on('agent_joined_chat')
-def handle_agent_notify(data):
-    target_user = data.get('to_user')
-    emit('agent_connected', {'name': 'Expert Agent'}, to=target_user)
+def handle_agent_message(data):
+    """Agent types a message, sent to User"""
+    target_user_id = data.get('target_user_id')
+    message = data.get('message')
+    
+    # Save Log
+    save_local_log(target_user_id, 'Agent', message)
+    
+    # Send to User (Client logic handles this as a message)
+    emit('bot_message', {'data': message, 'is_agent': True}, to=target_user_id)
 
 @socketio.on('mark_paid')
 def handle_payment_confirm(data):
+    """Frontend tells us payment is done"""
     user_id = data.get('user_id')
-    join_room(user_id)
     
-    chat_data = get_chat(user_id)
-    if chat_data:
-        chat_data['paid'] = True
-        save_chat(user_id, chat_data['history'], True)
-        emit('new_paid_user', {'user_id': user_id, 'history': chat_data['history']}, to='agent_room')
-        sync_chat_to_firebase(user_id, chat_data['history'])
+    # Update SQLite
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE chats SET paid=1 WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    
+    # Firebase is handled by the Client directly for 'activeSessionId', 
+    # but we can do a backup log here if needed.
 
+# --- STRIPE PAYMENT ---
 @app.route('/create-checkout-session', methods=['POST'])
 def create_checkout_session():
     try:
         data = request.json
         uid = data.get('userId')
-        base_url = request.headers.get('Origin', 'https://ava-assistant-api.onrender.com')
+        
+        # FIX: Redirect to the FRONTEND, not the API
+        success_url = f"{FRONTEND_URL}?payment_success=true&uid={uid}"
+        cancel_url = f"{FRONTEND_URL}?payment_canceled=true"
         
         session = stripe.checkout.Session.create(
             line_items=[{
@@ -257,13 +253,16 @@ def create_checkout_session():
                 'quantity': 1,
             }],
             mode='payment',
-            success_url=f"{base_url}/?payment_success=true&uid={uid}",
-            cancel_url=f"{base_url}/?payment_canceled=true",
+            success_url=success_url,
+            cancel_url=cancel_url,
         )
         return jsonify(url=session.url)
     except Exception as e:
         return jsonify(error=str(e)), 500
 
+@app.route('/')
+def index():
+    return "HelpByExperts API (Switchboard) is Running"
+
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
-
