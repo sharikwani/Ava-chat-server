@@ -77,7 +77,7 @@ app.config['SECRET_KEY'] = 'secret!'
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # *** CRITICAL FIX: ASYNC_MODE SET TO EVENTLET ***
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 stripe.api_key = STRIPE_SECRET_KEY
 
 # --- DATABASE (LOCAL LOGS) ---
@@ -256,4 +256,5 @@ if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     # This runs the production-ready Eventlet server
     socketio.run(app, host='0.0.0.0', port=port)
+
 
