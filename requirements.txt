@@ -1,13 +1,8 @@
 flask
-flask-cors
 flask-socketio
-gevent
-gevent-websocket
-gunicorn
-google-generativeai
-stripe
+flask-cors
 python-dotenv
+stripe
+google-generativeai
 firebase-admin
-
-
-
+eventlet
