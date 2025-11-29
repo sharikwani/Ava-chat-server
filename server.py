@@ -1,6 +1,6 @@
-# 1. MONKEY PATCH MUST BE FIRST
-import eventlet
-eventlet.monkey_patch()
+# 1. MONKEY PATCH MUST BE FIRST (SWITCHED TO GEVENT)
+from gevent import monkey
+monkey.patch_all()
 
 import os
 import time
@@ -76,7 +76,9 @@ model = setup_model()
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
 CORS(app, resources={r"/*": {"origins": "*"}})
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
+# *** CRITICAL FIX: CHANGED TO GEVENT ***
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 stripe.api_key = STRIPE_SECRET_KEY
 
 # --- DATABASE (LOCAL LOGS) ---
@@ -161,7 +163,9 @@ def handle_user_message(data):
 
     # 3. AI MODE (Ava)
     emit('bot_typing', to=user_id)
-    eventlet.sleep(1) 
+    
+    # *** CRITICAL FIX: USE STANDARD TIME SLEEP (Monkey patched) ***
+    time.sleep(1) 
     
     try:
         # Reconstruct History for Context (Basic)
