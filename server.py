@@ -21,6 +21,7 @@ from firebase_admin import credentials, firestore
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+# Ensure this matches your actual Render Environment Variable name exactly!
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://www.helpbyexperts.com/account.html") 
 AGENT_PASSWORD = "admin" 
 
@@ -35,6 +36,7 @@ try:
         firebase_db = firestore.client()
         print("✅ Firebase Admin Connected")
     else:
+        # Fallback for local testing
         cred = credentials.Certificate("firebase-adminsdk.json")
         firebase_admin.initialize_app(cred)
         firebase_db = firestore.client()
@@ -91,23 +93,26 @@ def init_db():
 init_db()
 
 def save_local_log(user_id, sender, text):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT history, paid FROM chats WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    
-    history = []
-    paid = False
-    if row:
-        history = json.loads(row[0])
-        paid = row[1]
-    
-    history.append({'sender': sender, 'text': text})
-    
-    c.execute("INSERT OR REPLACE INTO chats (user_id, history, paid) VALUES (?, ?, ?)", 
-              (user_id, json.dumps(history), paid))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT history, paid FROM chats WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+        
+        history = []
+        paid = False
+        if row:
+            history = json.loads(row[0])
+            paid = row[1]
+        
+        history.append({'sender': sender, 'text': text})
+        
+        c.execute("INSERT OR REPLACE INTO chats (user_id, history, paid) VALUES (?, ?, ?)", 
+                  (user_id, json.dumps(history), paid))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Database Error: {e}")
 
 # --- HELPER: CHECK IF HUMAN IS LIVE ---
 def is_human_live(user_id):
@@ -137,10 +142,14 @@ def handle_register(data):
 def handle_user_message(data):
     user_id = data.get('user_id')
     msg_text = data.get('message')
+    
+    print(f"📩 RECEIVED MESSAGE from {user_id}: {msg_text}") # DEBUG LOG
+
     save_local_log(user_id, 'user', msg_text)
     
     # SWITCHBOARD LOGIC
     if is_human_live(user_id):
+        print(f"twisted_rightwards_arrows SWITCHBOARD: User {user_id} is LIVE with Agent. Skipping AI.") # DEBUG LOG
         emit('new_message_for_agent', {
             'text': msg_text,
             'user_id': user_id,
@@ -148,10 +157,12 @@ def handle_user_message(data):
         }, room=user_id) 
         return
 
+    print(f"robot SWITCHBOARD: User {user_id} is NOT live. Sending to Ava...") # DEBUG LOG
+
     # AI LOGIC
     emit('bot_typing', to=user_id)
     
-    # Eventlet compatible sleep
+    # Eventlet sleep
     eventlet.sleep(1) 
     
     try:
@@ -168,9 +179,11 @@ def handle_user_message(data):
                 if msg['sender'] == 'user': gemini_history.append({'role': 'user', 'parts': [msg['text']]})
                 elif msg['sender'] == 'bot': gemini_history.append({'role': 'model', 'parts': [msg['text']]})
 
+        print("🤖 CALLING GEMINI API...") # DEBUG LOG
         ai_chat = model.start_chat(history=gemini_history)
         response = ai_chat.send_message(msg_text)
         ai_text = response.text
+        print(f"✅ GEMINI REPLIED: {ai_text[:50]}...") # DEBUG LOG
         
         if "ACTION_TRIGGER_PAYMENT" in ai_text:
             clean_text = ai_text.replace("ACTION_TRIGGER_PAYMENT", "")
@@ -182,8 +195,8 @@ def handle_user_message(data):
             emit('bot_message', {'data': ai_text}, to=user_id)
             
     except Exception as e:
-        print(f"AI Error: {e}")
-        emit('bot_message', {'data': "I'm connecting..."}, to=user_id)
+        print(f"❌ AI ERROR: {e}") # DEBUG LOG
+        emit('bot_message', {'data': "I'm having trouble connecting to the brain. One moment."}, to=user_id)
 
 # --- AGENT EVENTS ---
 
