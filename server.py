@@ -115,19 +115,25 @@ def save_chat(user_id, history, paid):
     conn.close()
 
 # --- FIREBASE SYNC ---
-def sync_chat_to_firebase(user_id, history):
+# --- FIREBASE SYNC (NON-BLOCKING) ---
+def _save_to_firebase_task(user_id, history):
+    """The actual blocking work."""
     if firebase_db:
         try:
-            # Extract contact info from history if possible (basic parsing)
-            # This saves the whole chat so the Agent sees the Name/Phone provided to Ava
             firebase_db.collection('chats').add({
                 'user_id': user_id,
                 'history': history,
                 'timestamp': firestore.SERVER_TIMESTAMP,
                 'status': 'paid'
             })
+            print(f"✅ Firebase synced for {user_id}")
         except Exception as e:
             print(f"❌ Firebase Sync Error: {e}")
+
+def sync_chat_to_firebase(user_id, history):
+    """The wrapper that offloads work to a thread."""
+    # This executes the save in a separate thread so it doesn't freeze the chat
+    eventlet.tpool.execute(_save_to_firebase_task, user_id, history)
 
 # --- ROUTES ---
 @app.route('/')
@@ -266,3 +272,4 @@ def create_checkout_session():
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
+
