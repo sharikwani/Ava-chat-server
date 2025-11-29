@@ -78,7 +78,7 @@ app.config['SECRET_KEY'] = 'secret!'
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # *** CRITICAL FIX: CHANGED TO GEVENT ***
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
 
 # --- DATABASE (LOCAL LOGS) ---
@@ -269,4 +269,7 @@ def index():
     return "HelpByExperts API (Switchboard) is Running"
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
+    # Render provides the PORT environment variable
+    port = int(os.environ.get("PORT", 10000))
+    socketio.run(app, host='0.0.0.0', port=port)
+
