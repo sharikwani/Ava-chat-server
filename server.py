@@ -1,6 +1,6 @@
-# 1. MONKEY PATCH MUST BE FIRST (SWITCHED TO GEVENT)
-from gevent import monkey
-monkey.patch_all()
+# 1. MONKEY PATCH MUST BE FIRST (EVENTLET VERSION)
+import eventlet
+eventlet.monkey_patch()
 
 import os
 import time
@@ -21,7 +21,6 @@ from firebase_admin import credentials, firestore
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-# REPLACE THIS WITH YOUR ACTUAL FRONTEND URL (Where the user should go after paying)
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://www.helpbyexperts.com/account.html") 
 AGENT_PASSWORD = "admin" 
 
@@ -36,7 +35,6 @@ try:
         firebase_db = firestore.client()
         print("✅ Firebase Admin Connected")
     else:
-        # Fallback for local testing if using file
         cred = credentials.Certificate("firebase-adminsdk.json")
         firebase_admin.initialize_app(cred)
         firebase_db = firestore.client()
@@ -77,7 +75,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# *** CRITICAL FIX: CHANGED TO GEVENT ***
+# *** CRITICAL FIX: ASYNC_MODE SET TO EVENTLET ***
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -93,10 +91,8 @@ def init_db():
 init_db()
 
 def save_local_log(user_id, sender, text):
-    """Simple local backup of messages"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Get existing
     c.execute("SELECT history, paid FROM chats WHERE user_id=?", (user_id,))
     row = c.fetchone()
     
@@ -115,16 +111,12 @@ def save_local_log(user_id, sender, text):
 
 # --- HELPER: CHECK IF HUMAN IS LIVE ---
 def is_human_live(user_id):
-    """Checks Firestore to see if Agent accepted the chat"""
     if not firebase_db: return False
     try:
-        # 1. Get User's Active Session ID
         user_doc = firebase_db.collection('users').document(user_id).get()
         if user_doc.exists:
             data = user_doc.to_dict()
             session_id = data.get('activeSessionId')
-            
-            # 2. Check that Session's Status
             if session_id:
                 chat_doc = firebase_db.collection('chats').document(session_id).get()
                 if chat_doc.exists and chat_doc.to_dict().get('status') == 'live':
@@ -138,22 +130,17 @@ def is_human_live(user_id):
 @socketio.on('register')
 def handle_register(data):
     user_id = data.get('user_id')
-    join_room(user_id) # Join User Room
+    join_room(user_id)
     print(f"User connected: {user_id}")
 
 @socketio.on('user_message')
 def handle_user_message(data):
     user_id = data.get('user_id')
     msg_text = data.get('message')
-    
-    # 1. Save Local Log
     save_local_log(user_id, 'user', msg_text)
     
-    # 2. THE SWITCHBOARD LOGIC
-    # Check if this user is currently talking to a Human Agent
+    # SWITCHBOARD LOGIC
     if is_human_live(user_id):
-        # SKIP AI. Send directly to Agent Dashboard.
-        # We emit to the user_id room. The Agent joined this room via 'agent_join'
         emit('new_message_for_agent', {
             'text': msg_text,
             'user_id': user_id,
@@ -161,14 +148,13 @@ def handle_user_message(data):
         }, room=user_id) 
         return
 
-    # 3. AI MODE (Ava)
+    # AI LOGIC
     emit('bot_typing', to=user_id)
     
-    # *** CRITICAL FIX: USE STANDARD TIME SLEEP (Monkey patched) ***
-    time.sleep(1) 
+    # Eventlet compatible sleep
+    eventlet.sleep(1) 
     
     try:
-        # Reconstruct History for Context (Basic)
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute("SELECT history FROM chats WHERE user_id=?", (user_id,))
@@ -178,7 +164,7 @@ def handle_user_message(data):
         gemini_history = []
         if row:
             raw_hist = json.loads(row[0])
-            for msg in raw_hist[-10:]: # Context window 10
+            for msg in raw_hist[-10:]:
                 if msg['sender'] == 'user': gemini_history.append({'role': 'user', 'parts': [msg['text']]})
                 elif msg['sender'] == 'bot': gemini_history.append({'role': 'model', 'parts': [msg['text']]})
 
@@ -203,47 +189,33 @@ def handle_user_message(data):
 
 @socketio.on('agent_join')
 def handle_agent_join(data):
-    """Agent accepts a chat and enters the room"""
     target_user_id = data.get('target_user_id')
-    join_room(target_user_id) # Agent enters the User's room
+    join_room(target_user_id)
     print(f"Agent joined room: {target_user_id}")
     emit('agent_status', {'status': 'connected'}, to=target_user_id)
 
 @socketio.on('agent_message')
 def handle_agent_message(data):
-    """Agent types a message, sent to User"""
     target_user_id = data.get('target_user_id')
     message = data.get('message')
-    
-    # Save Log
     save_local_log(target_user_id, 'Agent', message)
-    
-    # Send to User (Client logic handles this as a message)
     emit('bot_message', {'data': message, 'is_agent': True}, to=target_user_id)
 
 @socketio.on('mark_paid')
 def handle_payment_confirm(data):
-    """Frontend tells us payment is done"""
     user_id = data.get('user_id')
-    
-    # Update SQLite
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("UPDATE chats SET paid=1 WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
-    
-    # Firebase is handled by the Client directly for 'activeSessionId', 
-    # but we can do a backup log here if needed.
 
-# --- STRIPE PAYMENT ---
+# --- STRIPE ---
 @app.route('/create-checkout-session', methods=['POST'])
 def create_checkout_session():
     try:
         data = request.json
         uid = data.get('userId')
-        
-        # FIX: Redirect to the FRONTEND, not the API
         success_url = f"{FRONTEND_URL}?payment_success=true&uid={uid}"
         cancel_url = f"{FRONTEND_URL}?payment_canceled=true"
         
@@ -266,11 +238,9 @@ def create_checkout_session():
 
 @app.route('/')
 def index():
-    return "HelpByExperts API (Switchboard) is Running"
+    return "HelpByExperts API (Eventlet) is Running"
 
 if __name__ == '__main__':
-    # Render provides the PORT environment variable
     port = int(os.environ.get("PORT", 10000))
+    # This runs the production-ready Eventlet server
     socketio.run(app, host='0.0.0.0', port=port)
-
-
