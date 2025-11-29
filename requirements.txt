@@ -1,11 +1,13 @@
 flask
 flask-cors
 flask-socketio
-eventlet
+gevent
+gevent-websocket
 gunicorn
 google-generativeai
 stripe
 python-dotenv
 firebase-admin
+
 
 
