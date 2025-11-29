@@ -1,8 +1,9 @@
 flask
-flask-socketio
 flask-cors
-python-dotenv
-stripe
-google-generativeai
-firebase-admin
+flask-socketio
 eventlet
+gunicorn
+google-generativeai
+stripe
+python-dotenv
+firebase-admin
