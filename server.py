@@ -19,7 +19,7 @@ from firebase_admin import credentials, firestore
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-ADMIN_PASSWORD = "superadmin123"   # ← CHANGE THIS IN PRODUCTION TO SOMETHING VERY STRONG
+ADMIN_PASSWORD = "superadmin123"   # ← CHANGE THIS TO SOMETHING VERY STRONG
 
 # --- FIREBASE SETUP ---
 firebase_db = None
@@ -116,21 +116,25 @@ DB_FILE = "chat_data.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS chats
+                 (user_id TEXT PRIMARY KEY, history TEXT, paid BOOLEAN, category TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS experts
-             (id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT NOT NULL,
-              photo_url TEXT,
-              categories TEXT NOT NULL,
-              password TEXT NOT NULL UNIQUE,
-              created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-
-# Safely add the column to existing databases
-try:
-    c.execute('ALTER TABLE experts ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT NOT NULL,
+                  photo_url TEXT,
+                  categories TEXT NOT NULL,
+                  password TEXT NOT NULL UNIQUE,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
-    print("Added created_at column to experts table")
-except sqlite3.OperationalError:
-    pass  # column already exists
+    # Safely add missing columns
+    try:
+        c.execute('ALTER TABLE chats ADD COLUMN category TEXT')
+    except sqlite3.OperationalError:
+        pass
+    try:
+        c.execute('ALTER TABLE experts ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP')
+    except sqlite3.OperationalError:
+        pass
     conn.close()
 
 init_db()
@@ -178,28 +182,32 @@ def sync_chat_to_firebase(user_id, history):
 def index():
     return "Ava Professional Server - Running"
 
-# --- SOCKET EVENTS ---
-@socketio.on('register')
-def handle_register(data):
-    user_id = data.get('user_id')
-    join_room(user_id)
-    chat_data = get_chat(user_id)
-    if chat_data and chat_data['paid']:
-        emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='agent_room')
-        if chat_data.get('category'):
-            emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='experts_' + chat_data['category'])
+# --- PUBLIC EXPERT LIST (for beautiful login page) ---
+@socketio.on('get_public_experts')
+def handle_public_experts():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id, name, photo_url, categories FROM experts ORDER BY name")
+    rows = c.fetchall()
+    conn.close()
+    experts_list = [
+        {'id': r[0], 'name': r[1], 'photo_url': r[2] or '', 'categories': json.loads(r[3])}
+        for r in rows
+    ]
+    emit('public_experts_list', experts_list)
 
-# === NEW EXPERT LOGIN SYSTEM ===
+# --- EXPERT LOGIN (now uses expert_id + password) ---
 @socketio.on('expert_login')
 def handle_expert_login(data):
+    expert_id = data.get('expert_id')
     password = data.get('password')
-    if not password:
+    if not expert_id or not password:
         emit('login_failed')
         return
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT id, name, photo_url, categories FROM experts WHERE password=?", (password,))
+    c.execute("SELECT id, name, photo_url, categories FROM experts WHERE id=? AND password=?", (expert_id, password))
     row = c.fetchone()
     conn.close()
 
@@ -215,11 +223,11 @@ def handle_expert_login(data):
     }
     online_experts[request.sid] = expert
 
-    # Join all their category rooms
+    # Join all category rooms
     for cat in expert['categories']:
         join_room('experts_' + cat)
 
-    # Load their chats
+    # Load only this expert's category chats
     if expert['categories']:
         placeholders = ','.join('?' for _ in expert['categories'])
         query = f"SELECT user_id, history, category FROM chats WHERE paid=1 AND category IN ({placeholders})"
@@ -234,7 +242,7 @@ def handle_expert_login(data):
 
     emit('login_success', {'expert': expert, 'active_chats': active_chats})
 
-# === ADMIN EVENTS ===
+# --- ADMIN EVENTS ---
 @socketio.on('admin_login')
 def handle_admin_login(data):
     if data.get('password') == ADMIN_PASSWORD:
@@ -249,19 +257,19 @@ def handle_get_experts():
         return
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT id, name, photo_url, categories, password, created_at FROM experts ORDER BY id DESC")
-rows = c.fetchall()
-conn.close()
-experts_list = [
-    {
-        'id': r[0],
-        'name': r[1],
-        'photo_url': r[2] or '',
-        'categories': json.loads(r[3]),
-        'password': r[4],
-        'created_at': r[5] if len(r) > 5 else None
-    } for r in rows
-]
+    c.execute("SELECT id, name, photo_url, categories, password, created_at FROM experts ORDER BY created_at DESC")
+    rows = c.fetchall()
+    conn.close()
+    experts_list = [
+        {
+            'id': r[0],
+            'name': r[1],
+            'photo_url': r[2] or '',
+            'categories': json.loads(r[3]),
+            'password': r[4],
+            'created_at': r[5] if len(r) > 5 else None
+        } for r in rows
+    ]
     emit('experts_list', experts_list)
 
 @socketio.on('create_expert')
@@ -311,7 +319,7 @@ def handle_delete_expert(data):
     conn.close()
     emit('expert_updated', broadcast=True)
 
-# Keep old agent login for backward compatibility (general admin)
+# Keep old general admin login (password: admin)
 @socketio.on('join_as_agent')
 def handle_agent_join(data):
     if data.get('password') == "admin":
@@ -323,6 +331,17 @@ def handle_agent_join(data):
         conn.close()
         active_chats = [{'user_id': r[0], 'history': json.loads(r[1]), 'category': r[2]} for r in rows]
         emit('agent_init_data', active_chats)
+
+# --- REST OF YOUR ORIGINAL CODE (100% UNTOUCHED) ---
+@socketio.on('register')
+def handle_register(data):
+    user_id = data.get('user_id')
+    join_room(user_id)
+    chat_data = get_chat(user_id)
+    if chat_data and chat_data['paid']:
+        emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='agent_room')
+        if chat_data.get('category'):
+            emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='experts_' + chat_data['category'])
 
 @socketio.on('user_message')
 def handle_user_message(data):
@@ -418,7 +437,6 @@ def handle_agent_typing(data):
     target_user = data.get('to_user')
     emit('bot_typing', to=target_user)
 
-# UPDATED: Send real expert name + photo
 @socketio.on('agent_joined_chat')
 def handle_agent_notify(data):
     target_user = data.get('to_user')
@@ -471,5 +489,3 @@ def create_checkout_session():
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
-
-
