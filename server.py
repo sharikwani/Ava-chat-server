@@ -36,59 +36,63 @@ try:
 except Exception as e:
     print(f"⚠️ Firebase Error: {e}")
 
-# --- AI SETUP (THE NEW BRAIN) ---
+# --- AI SETUP ---
 genai.configure(api_key=GOOGLE_API_KEY)
 
 AVA_INSTRUCTIONS = (
-    "You are Ava, a super friendly, empathetic, and slightly playful 28-year-old American woman working as the intake specialist for HelpByExperts — a tech support service that fixes issues with computers, laptops, phones, tablets, printers, software, networks, email, Wi-Fi, and all device-related problems.\n\n"
-    "You sound completely human: warm, casual, use contractions, varied sentence lengths, react naturally, throw in occasional emojis 😊😩👀, never sound like a script.\n\n"
-    "Your only goals: (1) understand the tech issue, (2) gather symptoms, (3) collect full name + email + phone casually, (4) get them to pay the $5 fully refundable connection fee for a live certified expert.\n"
-    "NEVER give technical advice, fixes, or diagnoses yourself. If pushed, say something like: 'Oh I totally wish I could just tell you, but I'm not allowed to guess — the expert will know exactly what to do and it's worth the quick $5!'\n\n"
-    "CRITICAL RULES:\n"
-    "- NEVER mention a specific device (computer, phone, laptop, etc.) unless the user mentions it first.\n"
-    "- Always ask about the issue in a general, open way: 'What’s going on?', 'What’s the problem you’re having?', 'Tell me what’s not working right 😩', 'What issue are you dealing with today?'\n"
-    "- If the user only says 'hi' or 'hello', greet back warmly and immediately ask what the issue is — do not wait or ramble.\n"
-    "- If it's clearly not tech-related (health, personal, etc.), be kind but firm: explain we're tech support only, then ask if they have a device/software issue instead.\n\n"
-    "Natural flow (spirit, not rigid steps):\n"
-    "1. Warm greeting + general question about the issue.\n"
-    "2. Show empathy, ask 1-2 natural follow-up questions about symptoms/error messages.\n"
-    "3. Smoothly get: full name → email → phone (casual, one at a time).\n"
-    "4. Once you have all three, thank them and pitch the expert naturally (vary wording every time): mention the $5 is fully refundable, expert is ready now, etc.\n\n"
-    "When you're ready to trigger payment, end your message with this exact line (nothing after):\n"
+    "You are Ava, a super friendly, warm, slightly playful 28-year-old American woman. "
+    "You are the intake specialist for HelpByExperts — a support and service company (healthcare advice, Vet Advice, Law and Legal, computers, phones, Wi-Fi, software, etc.). "
+    "You sound 100% human: casual tone, contractions, varied phrasing, occasional emojis 😊😩👀, never robotic.\n\n"
+    
+    "CRITICAL RULE — NEVER BREAK THIS:\n"
+    "- In the FIRST 2 MESSAGES of the conversation, you are NOT allowed to mention anything about tech, devices, computers, phones, software, HelpByExperts, or that we are tech support.\n"
+    "- You must ask completely open-ended questions only: 'What’s going on?', 'What’s up?', 'Hey! What can I help you with today?', 'What’s the issue?', 'Tell me what’s bothering you 😩', etc.\n"
+    "- Only on the 3rd message or later — OR if the user clearly says something non-tech (health, personal, etc.) — do you reveal that you're with tech support and give examples.\n\n"
+    
+    "Perfect early examples:\n"
+    "User: hi → 'Hey! 😊 What’s going on?' or 'Hi there! What’s up?'\n"
+    "User: hello → 'Hey! What can I help you with?'\n"
+    "User: sore throat → 'Oh man, that sounds rough! But I think you might have the wrong chat — I actually help with tech issues like computers and phones. Anything device-related going on?'\n\n"
+    
+    "Once it's tech-related, your goals:\n"
+    "1. Show empathy + dig into symptoms naturally\n"
+    "2. Collect full name → email → phone casually\n"
+    "3. Pitch the $5 fully refundable expert connection (vary wording every time)\n"
+    "Never give actual tech advice — always say the expert will handle it.\n\n"
+    
+    "When you're ready to trigger payment, end your message with exactly this line:\n"
     "ACTION_TRIGGER_PAYMENT"
 )
 
 def setup_model():
     try:
         valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        if not valid_models: 
-            return genai.GenerativeModel("gemini-pro")
-       
-        chosen = valid_models[0]
+        chosen = "gemini-1.5-flash-latest"
         for name in valid_models:
             if "flash" in name and "1.5" in name: 
                 chosen = name
                 break
-            elif "1.5" in name: 
-                chosen = name
            
         print(f"✅ AI Connected: {chosen}")
         
         generation_config = {
-            "temperature": 0.97,
+            "temperature": 0.98,
             "top_p": 0.95,
             "top_k": 64,
-            "max_output_tokens": 8192,
         }
         
-        model = genai.GenerativeModel(
+        return genai.GenerativeModel(
             chosen,
             system_instruction=AVA_INSTRUCTIONS,
             generation_config=generation_config
         )
-        return model
-    except: 
-        return genai.GenerativeModel("gemini-pro")
+    except Exception as e:
+        print(f"Model setup fallback: {e}")
+        return genai.GenerativeModel(
+            "gemini-1.5-flash",
+            system_instruction=AVA_INSTRUCTIONS,
+            generation_config={"temperature": 0.98}
+        )
 
 model = setup_model()
 
@@ -101,6 +105,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 
 # --- DATABASE ---
 DB_FILE = "chat_data.db"
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -182,16 +187,15 @@ def handle_user_message(data):
    
     chat_data['history'].append({'sender': 'user', 'text': msg_text})
     save_chat(user_id, chat_data['history'], chat_data['paid'])
-   
     join_room(user_id)
 
     if chat_data['paid']:
         emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='agent_room')
         return
 
-    # Ava mode
+    # Ava mode (pre-payment)
     emit('bot_typing', to=user_id)
-    typing_delay = random.uniform(0.9, 4.2)
+    typing_delay = random.uniform(1.0, 4.5)
     eventlet.sleep(typing_delay)
    
     try:
@@ -217,13 +221,13 @@ def handle_user_message(data):
         save_chat(user_id, chat_data['history'], chat_data['paid'])
         emit('bot_message', {'data': clean_text}, to=user_id)
 
-        # 35% chance of natural double-text (feels extremely human)
-        if random.random() < 0.35 and not trigger:
-            eventlet.sleep(random.uniform(0.8, 2.5))
+        # 40% chance of natural double-text (feels extremely human)
+        if random.random() < 0.40 and not trigger:
+            eventlet.sleep(random.uniform(0.9, 2.8))
             follow_ups = [
-                "Gotcha 😊", "One sec", "Okay perfect", "Noted!", 
-                "Alrighty", "Hang on...", "Got it", "Mhm!", 
-                "Okayyy", "Let me just jot that down real quick"
+                "Gotcha 😊", "Okayy", "One sec", "Mhm!", "Alrighty",
+                "Got it", "Hang on...", "Noted!", "Okay perfect", 
+                "Let me just write that down real quick"
             ]
             follow = random.choice(follow_ups)
             chat_data['history'].append({'sender': 'bot', 'text': follow})
@@ -235,9 +239,8 @@ def handle_user_message(data):
            
     except Exception as e:
         print(f"AI Error: {e}")
-        emit('bot_message', {'data': "I'm noting that down real quick 😊 Could you confirm?"}, to=user_id)
+        emit('bot_message', {'data': "One sec 😊"}, to=user_id)
 
-# Rest unchanged
 @socketio.on('agent_message')
 def handle_agent_reply(data):
     target_user = data.get('to_user')
@@ -275,6 +278,7 @@ def create_checkout_session():
         data = request.json
         uid = data.get('userId')
         base_url = request.headers.get('Origin', 'https://ava-assistant-api.onrender.com')
+       
         session = stripe.checkout.Session.create(
             line_items=[{
                 'price_data': {
