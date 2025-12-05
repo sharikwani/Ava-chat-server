@@ -116,21 +116,21 @@ DB_FILE = "chat_data.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS chats
-                 (user_id TEXT PRIMARY KEY, history TEXT, paid BOOLEAN, category TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS experts
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  name TEXT NOT NULL,
-                  photo_url TEXT,
-                  categories TEXT NOT NULL,
-                  password TEXT NOT NULL UNIQUE)''')
+             (id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              photo_url TEXT,
+              categories TEXT NOT NULL,
+              password TEXT NOT NULL UNIQUE,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+# Safely add the column to existing databases
+try:
+    c.execute('ALTER TABLE experts ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP')
     conn.commit()
-    # Safely add category column if missing
-    try:
-        c.execute('ALTER TABLE chats ADD COLUMN category TEXT')
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
+    print("Added created_at column to experts table")
+except sqlite3.OperationalError:
+    pass  # column already exists
     conn.close()
 
 init_db()
@@ -470,3 +470,4 @@ def create_checkout_session():
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
+
