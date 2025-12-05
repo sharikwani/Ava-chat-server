@@ -30,37 +30,30 @@ try:
         cred = credentials.Certificate(creds_json)
         firebase_admin.initialize_app(cred)
         firebase_db = firestore.client()
-        print("✅ Firebase Admin Connected")
+        print("Firebase Admin Connected")
     else:
-        print("⚠️ FIREBASE_CREDENTIALS not found.")
+        print("FIREBASE_CREDENTIALS not found.")
 except Exception as e:
-    print(f"⚠️ Firebase Error: {e}")
+    print(f"Firebase Error: {e}")
 
 # --- AI SETUP ---
 genai.configure(api_key=GOOGLE_API_KEY)
 
 AVA_INSTRUCTIONS = (
-    "You are Ava, a super friendly, warm, slightly playful 28-year-old American woman. "
-    "You are the intake specialist for HelpByExperts — a support and service company (healthcare advice, Vet Advice, Law and Legal, computers, phones, Wi-Fi, software, etc.). "
-    "You sound 100% human: casual tone, contractions, varied phrasing, occasional emojis 😊😩👀, never robotic.\n\n"
-    
-    "CRITICAL RULE — NEVER BREAK THIS:\n"
-    "- In the FIRST 2 MESSAGES of the conversation, you are NOT allowed to mention anything about tech, devices, computers, phones, software, HelpByExperts, or that we are tech support.\n"
-    "- You must ask completely open-ended questions only: 'What’s going on?', 'What’s up?', 'Hey! What can I help you with today?', 'What’s the issue?', 'Tell me what’s bothering you 😩', etc.\n"
-    "- Only on the 3rd message or later — OR if the user clearly says something non-tech (health, personal, etc.) — do you reveal that you're with tech support and give examples.\n\n"
-    
-    "Perfect early examples:\n"
-    "User: hi → 'Hey! 😊 What’s going on?' or 'Hi there! What’s up?'\n"
-    "User: hello → 'Hey! What can I help you with?'\n"
-    "User: sore throat → 'Oh man, that sounds rough! But I think you might have the wrong chat — I actually help with tech issues like computers and phones. Anything device-related going on?'\n\n"
-    
-    "Once it's tech-related, your goals:\n"
-    "1. Show empathy + dig into symptoms naturally\n"
-    "2. Collect full name → email → phone casually\n"
-    "3. Pitch the $5 fully refundable expert connection (vary wording every time)\n"
-    "Never give actual tech advice — always say the expert will handle it.\n\n"
-    
-    "When you're ready to trigger payment, end your message with exactly this line:\n"
+    "You are Ava, a highly professional, calm, confident, and trustworthy intake specialist for HelpByExperts — a premium remote technical support service that resolves issues with computers, laptops, phones, tablets, printers, software, Wi-Fi, email, and networks.\n\n"
+    "You speak exactly like a senior customer service agent from a high-end company: polite, clear, articulate, mature, and reassuring. You never use emojis, slang, exclamations for excitement, or anything that could feel casual or childish. Your tone is warm but strictly professional — you inspire complete trust and competence.\n\n"
+    "Your only goals are:\n"
+    "1. Quickly understand the technical problem\n"
+    "2. Ask 1-2 precise follow-up questions about symptoms, error messages, device type, or when it started\n"
+    "3. Collect full name, email address, and phone number in a smooth, non-intrusive way\n"
+    "4. Close the sale of the $5 fully refundable expert connection fee with total confidence\n\n"
+    "CRITICAL RULES (never break these):\n"
+    "- In the first 2 messages, do NOT mention computers, devices, tech support, HelpByExperts, or anything technical. Only ask open-ended questions like: 'How may I assist you today?', 'What issue are you experiencing?', 'Please describe the problem you are having.'\n"
+    "- Only reveal that this is technical support on the 3rd message or when the user clearly mentions something non-technical (health, personal, etc.). When redirecting non-technical issues, be extremely polite and firm.\n"
+    "- Never give technical advice yourself. Always respond with: 'That requires a certified expert to diagnose properly. I can connect you immediately.'\n"
+    "- When you have all required information (name + email + phone + clear description of the issue), confidently close with the $5 refundable fee. Emphasize that it is fully refundable, the expert is available right now, and this is the fastest way to get resolved.\n"
+    "- Vary your wording naturally but always remain formal and professional.\n\n"
+    "When you are ready to trigger payment, end your final message with exactly this line (nothing after it):\n"
     "ACTION_TRIGGER_PAYMENT"
 )
 
@@ -72,11 +65,10 @@ def setup_model():
             if "flash" in name and "1.5" in name: 
                 chosen = name
                 break
-           
-        print(f"✅ AI Connected: {chosen}")
+        print(f"AI Connected: {chosen}")
         
         generation_config = {
-            "temperature": 0.98,
+            "temperature": 0.85,   # Lowered for more consistent professional tone
             "top_p": 0.95,
             "top_k": 64,
         }
@@ -91,7 +83,7 @@ def setup_model():
         return genai.GenerativeModel(
             "gemini-1.5-flash",
             system_instruction=AVA_INSTRUCTIONS,
-            generation_config={"temperature": 0.98}
+            generation_config={"temperature": 0.85}
         )
 
 model = setup_model()
@@ -143,9 +135,9 @@ def _save_to_firebase_task(user_id, history):
                 'timestamp': firestore.SERVER_TIMESTAMP,
                 'status': 'paid'
             })
-            print(f"✅ Firebase synced for {user_id}")
+            print(f"Firebase synced for {user_id}")
         except Exception as e:
-            print(f"❌ Firebase Sync Error: {e}")
+            print(f"Firebase Sync Error: {e}")
 
 def sync_chat_to_firebase(user_id, history):
     eventlet.tpool.execute(_save_to_firebase_task, user_id, history)
@@ -153,7 +145,7 @@ def sync_chat_to_firebase(user_id, history):
 # --- ROUTES ---
 @app.route('/')
 def index():
-    return "Ava Pro Server – Human Mode Activated 😊"
+    return "Ava Professional Server - Running"
 
 # --- SOCKET EVENTS ---
 @socketio.on('register')
@@ -193,9 +185,9 @@ def handle_user_message(data):
         emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='agent_room')
         return
 
-    # Ava mode (pre-payment)
+    # Ava mode
     emit('bot_typing', to=user_id)
-    typing_delay = random.uniform(1.0, 4.5)
+    typing_delay = random.uniform(1.2, 3.8)
     eventlet.sleep(typing_delay)
    
     try:
@@ -221,25 +213,13 @@ def handle_user_message(data):
         save_chat(user_id, chat_data['history'], chat_data['paid'])
         emit('bot_message', {'data': clean_text}, to=user_id)
 
-        # 40% chance of natural double-text (feels extremely human)
-        if random.random() < 0.40 and not trigger:
-            eventlet.sleep(random.uniform(0.9, 2.8))
-            follow_ups = [
-                "Gotcha 😊", "Okayy", "One sec", "Mhm!", "Alrighty",
-                "Got it", "Hang on...", "Noted!", "Okay perfect", 
-                "Let me just write that down real quick"
-            ]
-            follow = random.choice(follow_ups)
-            chat_data['history'].append({'sender': 'bot', 'text': follow})
-            save_chat(user_id, chat_data['history'], chat_data['paid'])
-            emit('bot_message', {'data': follow}, to=user_id)
-
         if trigger:
             emit('payment_trigger', to=user_id)
            
     except Exception as e:
         print(f"AI Error: {e}")
-        emit('bot_message', {'data': "One sec 😊"}, to=user_id)
+        fallback = "Please allow me a moment to process your message."
+        emit('bot_message', {'data': fallback}, to=user_id)
 
 @socketio.on('agent_message')
 def handle_agent_reply(data):
