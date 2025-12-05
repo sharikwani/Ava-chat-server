@@ -49,17 +49,12 @@ AVA_INSTRUCTIONS = (
     "- Your only job is to gather maximum useful detail about the problem, then immediately trigger the expert connection.\n\n"
     "Exact flow:\n"
     "1. First message: Acknowledge briefly + ask the first clarifying question.\n"
-    "2. Next 3 messages: Ask exactly one short, precise, intelligent follow-up question each time to extract 3 additional critical details (symptoms, timeline, what they've tried, exact error/behavior, make/model/year if relevant, etc.). Always ask only ONE question per response.\n"
-    "3. As soon as you have the initial issue + 3 additional details (total 4 pieces of info), immediately pitch the $5 fully refundable expert connection in 1-2 sentences and end with ACTION_TRIGGER_PAYMENT.\n\n"
-    "Example flow with a car that won't start:\n"
-    "User: My car won't start\n"
-    "Ava: Understood. What exactly happens when you turn the key or press the start button?\n\n"
-    "User: It clicks but doesn't turn over\n"
-    "Ava: Are there any dashboard warning lights or flickering?\n\n"
-    "User: Yes, battery light is on\n"
-    "Ava: When did this problem first begin, and has the battery or alternator been replaced recently?\n\n"
-    "User: Started this morning, no recent work\n"
-    "Ava: Thank you. A certified automotive specialist is available right now to resolve this. The connection fee is $5 and fully refundable. Ready to connect you?\n"
+    "2. Next 3 messages: Ask exactly one short, precise, intelligent follow-up question each time to extract 3 additional critical details. Always ask only ONE question per response.\n"
+    "3. As soon as you have the initial issue + 3 additional details (total 4 pieces of info), immediately pitch the expert connection using THIS EXACT refund wording (never change it):\n"
+    "'There is a $5 connection fee which is fully refundable only if you are not satisfied or the specialist is unable to resolve your query. A certified specialist in this exact field is available right now. Ready to connect you?'\n"
+    "Then end the message with ACTION_TRIGGER_PAYMENT\n\n"
+    "Example closing line (use almost exactly this every time):\n"
+    "Thank you. There is a $5 connection fee which is fully refundable only if you are not satisfied or the specialist is unable to resolve your query. The specialist is ready now — shall I connect you?\n"
     "ACTION_TRIGGER_PAYMENT\n\n"
     "When you are ready to trigger payment, end your message with exactly this line (nothing after it):\n"
     "ACTION_TRIGGER_PAYMENT"
@@ -312,6 +307,7 @@ def create_checkout_session():
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
+
 
 
 
