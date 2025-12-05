@@ -59,27 +59,45 @@ AVA_INSTRUCTIONS = (
 
 def setup_model():
     try:
-        valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        chosen = "gemini-1.5-flash-latest"
-        for name in valid_models:
-            if "flash" in name and "1.5" in name: 
+        # List all models that support generateContent
+        valid_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        valid_names = [m.name for m in valid_models]
+        print("Available Gemini models:", valid_names)
+
+        # Prefer the latest stable flash model (fast + cheap + perfect for intake)
+        chosen = None
+        for name in valid_names:
+            if 'flash' in name.lower() and 'preview' not in name and 'lite' not in name:
                 chosen = name
                 break
-        print(f"AI Connected: {chosen}")
-        
+
+        # If no stable flash, take any flash (including preview)
+        if not chosen:
+            for name in valid_names:
+                if 'flash' in name.lower():
+                    chosen = name
+                    break
+
+        # Ultimate fallback
+        if not chosen:
+            chosen = valid_names[0] if valid_names else "gemini-1.5-pro"
+
+        print(f"Chosen model: {chosen}")
+
         generation_config = {
-            "temperature": 0.85,   # Lowered for more consistent professional tone
+            "temperature": 0.85,
             "top_p": 0.95,
             "top_k": 64,
         }
-        
+
         return genai.GenerativeModel(
             chosen,
             system_instruction=AVA_INSTRUCTIONS,
             generation_config=generation_config
         )
     except Exception as e:
-        print(f"Model setup fallback: {e}")
+        print(f"Model setup error: {e}")
+        # Final safety net
         return genai.GenerativeModel(
             "gemini-1.5-flash",
             system_instruction=AVA_INSTRUCTIONS,
@@ -185,7 +203,6 @@ def handle_user_message(data):
         emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='agent_room')
         return
 
-    # Ava mode
     emit('bot_typing', to=user_id)
     typing_delay = random.uniform(1.2, 3.8)
     eventlet.sleep(typing_delay)
@@ -219,8 +236,11 @@ def handle_user_message(data):
     except Exception as e:
         print(f"AI Error: {e}")
         fallback = "Please allow me a moment to process your message."
+        chat_data['history'].append({'sender': 'bot', 'text': fallback})
+        save_chat(user_id, chat_data['history'], chat_data['paid'])
         emit('bot_message', {'data': fallback}, to=user_id)
 
+# Rest of events unchanged
 @socketio.on('agent_message')
 def handle_agent_reply(data):
     target_user = data.get('to_user')
