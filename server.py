@@ -249,18 +249,19 @@ def handle_get_experts():
         return
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT id, name, photo_url, categories, password FROM experts")
-    rows = c.fetchall()
-    conn.close()
-    experts_list = [
-        {
-            'id': r[0],
-            'name': r[1],
-            'photo_url': r[2] or '',
-            'categories': json.loads(r[3]),
-            'password': r[4]
-        } for r in rows
-    ]
+    c.execute("SELECT id, name, photo_url, categories, password, created_at FROM experts ORDER BY id DESC")
+rows = c.fetchall()
+conn.close()
+experts_list = [
+    {
+        'id': r[0],
+        'name': r[1],
+        'photo_url': r[2] or '',
+        'categories': json.loads(r[3]),
+        'password': r[4],
+        'created_at': r[5] if len(r) > 5 else None
+    } for r in rows
+]
     emit('experts_list', experts_list)
 
 @socketio.on('create_expert')
@@ -470,4 +471,5 @@ def create_checkout_session():
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
+
 
