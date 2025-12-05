@@ -8,7 +8,7 @@ import json
 import base64
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_socketio import SocketIO, emit, join_room
 from dotenv import load_dotenv
 import google.generativeai as genai
 import stripe
@@ -63,19 +63,41 @@ AVA_INSTRUCTIONS = (
 def setup_model():
     try:
         valid_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        chosen = "gemini-1.5-flash-latest"
-        for name in [m.name for m in valid_models]:
-            if "flash" in name.lower() and "1.5" in name:
+        valid_names = [m.name for m in valid_models]
+        
+        # Pick the latest stable flash model
+        chosen = None
+        for name in valid_names:
+            if 'flash' in name.lower() and 'preview' not in name:
                 chosen = name
                 break
+        if not chosen:
+            for name in valid_names:
+                if 'flash' in name.lower():
+                    chosen = name
+                    break
+        if not chosen and valid_names:
+            chosen = valid_names[0]
+
         print(f"AI Connected: {chosen}")
+
         return genai.GenerativeModel(
             chosen,
             system_instruction=AVA_INSTRUCTIONS,
-            generation_config={"temperature": 0.75, "top_p": 0.9, "top_k": 40, "max_output_tokens": 100}
+            generation_config={
+                "temperature": 0.75,
+                "top_p": 0.9,
+                "top_k": 40,
+                "max_output_tokens": 100
+            }
         )
-    except:
-        return genai.GenerativeModel("gemini-1.5-flash", system_instruction=AVA_INSTRUCTIONS)
+    except Exception as e:
+        print(f"Model setup fallback due to: {e}")
+        return genai.GenerativeModel(
+            "gemini-1.5-flash",
+            system_instruction=AVA_INSTRUCTIONS,
+            generation_config={"temperature": 0.75, "max_output_tokens": 100}
+        )
 
 model = setup_model()
 
@@ -86,7 +108,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
 
-# --- DATABASE (now with category) ---
+# --- DATABASE ---
 DB_FILE = "chat_data.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -115,12 +137,15 @@ def save_chat(user_id, history, paid, category='General/Other'):
     conn.commit()
     conn.close()
 
-# --- FIREBASE SYNC (with category) ---
+# --- FIREBASE SYNC ---
 def sync_chat_to_firebase(user_id, history, category):
     if firebase_db:
         eventlet.tpool.execute(lambda: firebase_db.collection('chats').add({
-            'user_id': user_id, 'history': history, 'category': category,
-            'timestamp': firestore.SERVER_TIMESTAMP, 'status': 'paid'
+            'user_id': user_id,
+            'history': history,
+            'category': category,
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'status': 'paid'
         }))
 
 # --- SOCKET EVENTS ---
@@ -133,11 +158,12 @@ def handle_register(data):
 def handle_agent_join(data):
     if data.get('password') != AGENT_PASSWORD:
         return
-    categories = data.get('categories', [])  # e.g. ["Medical/Health", "Veterinary/Pet Care"]
+    categories = data.get('categories', [])
     for cat in categories:
         room_name = f"{cat.lower().replace('/', '_')}_experts"
         join_room(room_name)
-    # Send all active paid chats (agent frontend will filter by their categories)
+
+    # Send all paid chats — frontend filters by category
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT user_id, history, category FROM chats WHERE paid=1")
@@ -150,29 +176,28 @@ def handle_agent_join(data):
 def handle_user_message(data):
     user_id = data.get('user_id')
     msg_text = data.get('message')
-   
+
     chat_data = get_chat(user_id)
     chat_data['history'].append({'sender': 'user', 'text': msg_text})
     save_chat(user_id, chat_data['history'], chat_data['paid'], chat_data['category'])
     join_room(user_id)
 
     if chat_data['paid']:
-        # Forward to correct expert room
         room = f"{chat_data['category'].lower().replace('/', '_')}_experts"
         emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to=room)
         return
 
-    # Ava pre-payment
     emit('bot_typing', to=user_id)
     eventlet.sleep(random.uniform(1.2, 3.8))
-   
+
     try:
-        gemini_history = [m for m in chat_data['history'][:-1] if m['sender'] != 'bot' or not m['text'].startswith('Category:')]
-        for msg in gemini_history:
-            if msg['sender'] == 'user':
-                gemini_history.append({'role': 'user', 'parts': [msg['text']]})
-            else:
-                gemini_history.append({'role': 'model', 'parts': [msg['text']]})
+        # Build clean history for Gemini (exclude internal Category: lines)
+        gemini_history = []
+        for msg in chat_data['history'][:-1]:
+            if msg['sender'] == 'bot' and msg['text'].strip().startswith('Category:'):
+                continue
+            role = 'user' if msg['sender'] == 'user' else 'model'
+            gemini_history.append({'role': role, 'parts': [msg['text']]})
 
         ai_chat = model.start_chat(history=gemini_history)
         response = ai_chat.send_message(msg_text)
@@ -188,7 +213,6 @@ def handle_user_message(data):
             for line in lines:
                 if line.strip().startswith("Category:"):
                     category = line.strip()[9:].strip()
-            # Remove Category and trigger line from display
             clean_lines = [l for l in lines if not l.strip().startswith("Category:") and l.strip() != "ACTION_TRIGGER_PAYMENT"]
             clean_text = "\n".join(clean_lines).strip()
 
@@ -199,7 +223,7 @@ def handle_user_message(data):
 
         if trigger:
             emit('payment_trigger', {'category': category}, to=user_id)
-           
+
     except Exception as e:
         print(f"AI Error: {e}")
         emit('bot_message', {'data': "Please allow me a moment."}, to=user_id)
@@ -208,30 +232,51 @@ def handle_user_message(data):
 def handle_payment_confirm(data):
     user_id = data.get('user_id')
     chat_data = get_chat(user_id)
-    chat_data['paid'] = True
-    save_chat(user_id, chat_data['history'], True, chat_data['category'])
-    
-    room = f"{chat_data['category'].lower().replace('/', '_')}_experts"
-    payload = {
-        'user_id': user_id,
-        'history': chat_data['history'],
-        'category': chat_data['category']
-    }
-    emit('new_paid_user', payload, to=room)
-    sync_chat_to_firebase(user_id, chat_data['history'], chat_data['category'])
+    if not chat_data['paid']:
+        chat_data['paid'] = True
+        save_chat(user_id, chat_data['history'], True, chat_data['category'])
 
-# Agent messaging (same chat box)
+        room = f"{chat_data['category'].lower().replace('/', '_')}_experts"
+        payload = {
+            'user_id': user_id,
+            'history': chat_data['history'],
+            'category': chat_data['category']
+        }
+        emit('new_paid_user', payload, to=room)
+        sync_chat_to_firebase(user_id, chat_data['history'], chat_data['category'])
+
 @socketio.on('agent_message')
 def handle_agent_reply(data):
     target_user = data.get('to_user')
     text = data.get('message')
     chat_data = get_chat(target_user)
-    if chat_data:
+    if chat_data and chat_data['paid']:
         chat_data['history'].append({'sender': 'agent', 'text': text})
-        save_chat(target_user, chat_data['history'], chat_data['paid'], chat_data['category'])
+        save_chat(target_user, chat_data['history'], True, chat_data['category'])
         emit('bot_message', {'data': text, 'is_agent': True}, to=target_user)
 
-# Rest of your events (agent_typing, agent_joined_chat, checkout session, etc.) remain unchanged
+@app.route('/create-checkout-session', methods=['POST'])
+def create_checkout_session():
+    try:
+        data = request.json
+        uid = data.get('userId')
+        base_url = request.headers.get('Origin', 'https://ava-assistant-api.onrender.com')
+        session = stripe.checkout.Session.create(
+            line_items=[{
+                'price_data': {
+                    'currency': 'usd',
+                    'product_data': {'name': 'Expert Connection Fee', 'description': 'Fully refundable if not satisfied'},
+                    'unit_amount': 500,
+                },
+                'quantity': 1,
+            }],
+            mode='payment',
+            success_url=f"{base_url}/?payment_success=true&uid={uid}",
+            cancel_url=f"{base_url}/?payment_canceled=true",
+        )
+        return jsonify(url=session.url)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
