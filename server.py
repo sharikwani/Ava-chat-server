@@ -14,13 +14,11 @@ import google.generativeai as genai
 import stripe
 import firebase_admin
 from firebase_admin import credentials, firestore
-
 # --- CONFIGURATION ---
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 AGENT_PASSWORD = "admin"
-
 # --- FIREBASE SETUP ---
 firebase_db = None
 try:
@@ -35,10 +33,8 @@ try:
         print("FIREBASE_CREDENTIALS not found.")
 except Exception as e:
     print(f"Firebase Error: {e}")
-
 # --- AI SETUP ---
 genai.configure(api_key=GOOGLE_API_KEY)
-
 AVA_INSTRUCTIONS = (
     "You are Ava, a highly professional, calm, confident, and trustworthy intake specialist for HelpByExperts — a premium service that connects users instantly to certified human experts in ANY field (medical, veterinary, automotive, plumbing, electrical, tech, legal, tax, relationships, appliances, HVAC, construction, business, real estate — literally anything).\n\n"
     "You speak like an elite concierge: polished, mature, discreet, authoritative, and extremely concise.\n\n"
@@ -59,46 +55,35 @@ AVA_INSTRUCTIONS = (
     "When you are ready to trigger payment, end your message with exactly this line (nothing after it):\n"
     "ACTION_TRIGGER_PAYMENT"
 )
-
 def setup_model():
     generation_config = {
     "temperature": 0.75,
     "top_p": 0.9,
     "top_k": 40,
-    "max_output_tokens": 110,   # Forces ultra-short responses (2-3 lines max)
+    "max_output_tokens": 110, # Forces ultra-short responses (2-3 lines max)
 }
     try:
-        # List all models that support generateContent
         valid_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         valid_names = [m.name for m in valid_models]
         print("Available Gemini models:", valid_names)
-
-        # Prefer the latest stable flash model (fast + cheap + perfect for intake)
         chosen = None
         for name in valid_names:
             if 'flash' in name.lower() and 'preview' not in name and 'lite' not in name:
                 chosen = name
                 break
-
-        # If no stable flash, take any flash (including preview)
         if not chosen:
             for name in valid_names:
                 if 'flash' in name.lower():
                     chosen = name
                     break
-
-        # Ultimate fallback
         if not chosen:
             chosen = valid_names[0] if valid_names else "gemini-1.5-pro"
-
         print(f"Chosen model: {chosen}")
-
         generation_config = {
             "temperature": 0.85,
             "top_p": 0.95,
             "top_k": 64,
         }
-
         return genai.GenerativeModel(
             chosen,
             system_instruction=AVA_INSTRUCTIONS,
@@ -106,49 +91,51 @@ def setup_model():
         )
     except Exception as e:
         print(f"Model setup error: {e}")
-        # Final safety net
         return genai.GenerativeModel(
             "gemini-1.5-flash",
             system_instruction=AVA_INSTRUCTIONS,
             generation_config={"temperature": 0.85}
         )
-
 model = setup_model()
-
 # --- SERVER SETUP ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
 CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
-
 # --- DATABASE ---
 DB_FILE = "chat_data.db"
-
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS chats
-                 (user_id TEXT PRIMARY KEY, history TEXT, paid BOOLEAN)''')
+                 (user_id TEXT PRIMARY KEY, history TEXT, paid BOOLEAN, category TEXT)''')
     conn.commit()
+    # Safely add category column if it doesn't exist yet
+    try:
+        c.execute('ALTER TABLE chats ADD COLUMN category TEXT')
+        conn.commit()
+        print("Added category column to DB")
+    except sqlite3.OperationalError:
+        pass  # already exists
     conn.close()
 init_db()
 
 def get_chat(user_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT history, paid FROM chats WHERE user_id=?", (user_id,))
+    c.execute("SELECT history, paid, category FROM chats WHERE user_id=?", (user_id,))
     row = c.fetchone()
     conn.close()
     if row:
-        return {'history': json.loads(row[0]), 'paid': row[1]}
-    return None
+        return {'history': json.loads(row[0]), 'paid': bool(row[1]), 'category': row[2]}
+    return {'history': [], 'paid': False, 'category': None}
 
-def save_chat(user_id, history, paid):
+def save_chat(user_id, history, paid, category=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO chats (user_id, history, paid) VALUES (?, ?, ?)",
-              (user_id, json.dumps(history), paid))
+    c.execute("INSERT OR REPLACE INTO chats (user_id, history, paid, category) VALUES (?, ?, ?, ?)",
+              (user_id, json.dumps(history), paid, category))
     conn.commit()
     conn.close()
 
@@ -165,7 +152,6 @@ def _save_to_firebase_task(user_id, history):
             print(f"Firebase synced for {user_id}")
         except Exception as e:
             print(f"Firebase Sync Error: {e}")
-
 def sync_chat_to_firebase(user_id, history):
     eventlet.tpool.execute(_save_to_firebase_task, user_id, history)
 
@@ -181,41 +167,62 @@ def handle_register(data):
     join_room(user_id)
     chat_data = get_chat(user_id)
     if chat_data and chat_data['paid']:
+        # Notify general agent room (backward compatibility)
         emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='agent_room')
+        # Also notify category-specific expert room
+        if chat_data.get('category'):
+            emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='experts_' + chat_data['category'])
 
 @socketio.on('join_as_agent')
 def handle_agent_join(data):
     if data.get('password') == AGENT_PASSWORD:
-        join_room('agent_room')
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT user_id, history FROM chats WHERE paid=1")
-        rows = c.fetchall()
-        conn.close()
-        active_chats = [{'user_id': r[0], 'history': json.loads(r[1])} for r in rows]
+        category = data.get('category')  # expert sends their category, e.g. "medical", "legal", etc. If missing → general admin
+        if category:
+            room = 'experts_' + category
+            join_room(room)
+            # Load only chats for this expert category
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT user_id, history, category FROM chats WHERE paid=1 AND category=?", (category,))
+            rows = c.fetchall()
+            conn.close()
+        else:
+            join_room('agent_room')
+            # General admin sees everything
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("SELECT user_id, history, category FROM chats WHERE paid=1")
+            rows = c.fetchall()
+            conn.close()
+
+        active_chats = [{'user_id': r[0], 'history': json.loads(r[1]), 'category': r[2]} for r in rows]
         emit('agent_init_data', active_chats)
 
 @socketio.on('user_message')
 def handle_user_message(data):
     user_id = data.get('user_id')
     msg_text = data.get('message')
-   
+  
     chat_data = get_chat(user_id)
-    if not chat_data:
-        chat_data = {'history': [], 'paid': False}
-   
+    if chat_data is None:
+        chat_data = {'history': [], 'paid': False, 'category': None}
+  
     chat_data['history'].append({'sender': 'user', 'text': msg_text})
-    save_chat(user_id, chat_data['history'], chat_data['paid'])
+    save_chat(user_id, chat_data['history'], chat_data['paid'], chat_data.get('category'))
     join_room(user_id)
 
     if chat_data['paid']:
+        # Send to general agent room
         emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='agent_room')
+        # Also send to category-specific expert room
+        if chat_data.get('category'):
+            emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='experts_' + chat_data['category'])
         return
 
     emit('bot_typing', to=user_id)
     typing_delay = random.uniform(1.2, 3.8)
     eventlet.sleep(typing_delay)
-   
+  
     try:
         gemini_history = []
         for msg in chat_data['history'][:-1]:
@@ -223,33 +230,60 @@ def handle_user_message(data):
                 gemini_history.append({'role': 'user', 'parts': [msg['text']]})
             elif msg['sender'] == 'bot':
                 gemini_history.append({'role': 'model', 'parts': [msg['text']]})
-       
+      
         ai_chat = model.start_chat(history=gemini_history)
         response = ai_chat.send_message(msg_text)
         ai_text = response.text.strip()
-       
+      
         trigger = False
         if ai_text.endswith("ACTION_TRIGGER_PAYMENT"):
             trigger = True
             clean_text = ai_text[:-len("ACTION_TRIGGER_PAYMENT")].strip()
+            # ──────────────────────────────────────
+            # CLASSIFY CATEGORY ONLY ONCE WHEN PAYMENT IS TRIGGERED
+            # ──────────────────────────────────────
+            if not chat_data.get('category'):
+                try:
+                    full_convo = "\n".join([f"{m['sender'].title()}: {m['text']}" for m in chat_data['history']])
+                    classify_prompt = (
+                        "You are an expert classifier. Determine the SINGLE best expert category needed for this user's issue.\n"
+                        "Respond with ONLY the category in lowercase, using hyphens instead of spaces, chosen exactly from this list:\n"
+                        "medical, legal, automotive, veterinary, plumbing, electrical, tech, tax, relationships, appliance-repair, hvac, construction, business, real-estate, finance, psychology, education, fitness, nutrition, other\n"
+                        "Conversation:\n" + full_convo
+                    )
+                    classification = model.generate_content(classify_prompt)
+                    proposed = classification.text.strip().lower().replace(' ', '-')
+                    # Simple mapping for common variants
+                    mapping = {
+                        'doctor': 'medical', 'health': 'medical', 'car': 'automotive', 'mechanic': 'automotive',
+                        'vet': 'veterinary', 'animal': 'veterinary', 'lawyer': 'legal', 'attorney': 'legal'
+                    }
+                    category = mapping.get(proposed, proposed)
+                    valid_categories = ["medical","legal","automotive","veterinary","plumbing","electrical","tech","tax",
+                                        "relationships","appliance-repair","hvac","construction","business","real-estate",
+                                        "finance","psychology","education","fitness","nutrition","other"]
+                    chat_data['category'] = category if category in valid_categories else 'other'
+                    print(f"Classified category for {user_id}: {chat_data['category']}")
+                except Exception as classify_error:
+                    print(f"Classification failed: {classify_error}")
+                    chat_data['category'] = 'other'
         else:
             clean_text = ai_text
 
         chat_data['history'].append({'sender': 'bot', 'text': clean_text})
-        save_chat(user_id, chat_data['history'], chat_data['paid'])
+        save_chat(user_id, chat_data['history'], chat_data['paid'], chat_data.get('category'))
         emit('bot_message', {'data': clean_text}, to=user_id)
 
         if trigger:
             emit('payment_trigger', to=user_id)
-           
+          
     except Exception as e:
         print(f"AI Error: {e}")
         fallback = "Please allow me a moment to process your message."
         chat_data['history'].append({'sender': 'bot', 'text': fallback})
-        save_chat(user_id, chat_data['history'], chat_data['paid'])
+        save_chat(user_id, chat_data['history'], chat_data['paid'], chat_data.get('category'))
         emit('bot_message', {'data': fallback}, to=user_id)
 
-# Rest of events unchanged
 @socketio.on('agent_message')
 def handle_agent_reply(data):
     target_user = data.get('to_user')
@@ -257,7 +291,7 @@ def handle_agent_reply(data):
     chat_data = get_chat(target_user)
     if chat_data:
         chat_data['history'].append({'sender': 'agent', 'text': text})
-        save_chat(target_user, chat_data['history'], chat_data['paid'])
+        save_chat(target_user, chat_data['history'], chat_data['paid'], chat_data.get('category'))
         emit('bot_message', {'data': text, 'is_agent': True}, to=target_user)
 
 @socketio.on('agent_typing')
@@ -277,8 +311,13 @@ def handle_payment_confirm(data):
     chat_data = get_chat(user_id)
     if chat_data:
         chat_data['paid'] = True
-        save_chat(user_id, chat_data['history'], True)
-        emit('new_paid_user', {'user_id': user_id, 'history': chat_data['history']}, to='agent_room')
+        save_chat(user_id, chat_data['history'], True, chat_data.get('category'))
+        payload = {'user_id': user_id, 'history': chat_data['history'], 'category': chat_data.get('category')}
+        # Always notify general agent room (backward compatibility + monitoring)
+        emit('new_paid_user', payload, to='agent_room')
+        # Also notify the specific expert category room so the right expert sees it immediately
+        if chat_data.get('category'):
+            emit('new_paid_user', payload, to='experts_' + chat_data['category'])
         sync_chat_to_firebase(user_id, chat_data['history'])
 
 @app.route('/create-checkout-session', methods=['POST'])
@@ -287,7 +326,7 @@ def create_checkout_session():
         data = request.json
         uid = data.get('userId')
         base_url = request.headers.get('Origin', 'https://ava-assistant-api.onrender.com')
-       
+      
         session = stripe.checkout.Session.create(
             line_items=[{
                 'price_data': {
@@ -307,8 +346,3 @@ def create_checkout_session():
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
-
-
-
-
-
