@@ -139,8 +139,13 @@ def init_db():
 
 init_db()
 
-# Track online experts: sid → expert dict
-online_experts = {}
+# Track online experts
+online_experts = {}          # sid → expert dict (for agent_joined_chat)
+online_experts_by_id = {}    # expert_id → set of sids (for online status in admin)
+
+def broadcast_online_status():
+    online_ids = list(online_experts_by_id.keys())
+    socketio.emit('online_experts_update', {'online_ids': online_ids}, to='admin_room')
 
 def get_chat(user_id):
     conn = sqlite3.connect(DB_FILE)
@@ -182,7 +187,7 @@ def sync_chat_to_firebase(user_id, history):
 def index():
     return "Ava Professional Server - Running"
 
-# --- PUBLIC EXPERT LIST (for beautiful login page) ---
+# --- PUBLIC EXPERT LIST ---
 @socketio.on('get_public_experts')
 def handle_public_experts():
     conn = sqlite3.connect(DB_FILE)
@@ -196,7 +201,7 @@ def handle_public_experts():
     ]
     emit('public_experts_list', experts_list)
 
-# --- EXPERT LOGIN (now uses expert_id + password) ---
+# --- EXPERT LOGIN ---
 @socketio.on('expert_login')
 def handle_expert_login(data):
     expert_id = data.get('expert_id')
@@ -221,13 +226,20 @@ def handle_expert_login(data):
         'photo_url': row[2] or '',
         'categories': json.loads(row[3])
     }
-    online_experts[request.sid] = expert
+    sid = request.sid
+    online_experts[sid] = expert
 
-    # Join all category rooms
+    # Track for online status
+    if expert['id'] not in online_experts_by_id:
+        online_experts_by_id[expert['id']] = set()
+    online_experts_by_id[expert['id']].add(sid)
+    broadcast_online_status()
+
+    # Join category rooms
     for cat in expert['categories']:
         join_room('experts_' + cat)
 
-    # Load only this expert's category chats
+    # Load chats
     if expert['categories']:
         placeholders = ','.join('?' for _ in expert['categories'])
         query = f"SELECT user_id, history, category FROM chats WHERE paid=1 AND category IN ({placeholders})"
@@ -242,12 +254,26 @@ def handle_expert_login(data):
 
     emit('login_success', {'expert': expert, 'active_chats': active_chats})
 
+# --- DISCONNECT HANDLER (for online status) ---
+@socketio.on('disconnect')
+def handle_disconnect():
+    sid = request.sid
+    expert = online_experts.pop(sid, None)
+    if expert:
+        expert_id = expert['id']
+        if expert_id in online_experts_by_id:
+            online_experts_by_id[expert_id].discard(sid)
+            if not online_experts_by_id[expert_id]:
+                del online_experts_by_id[expert_id]
+            broadcast_online_status()
+
 # --- ADMIN EVENTS ---
 @socketio.on('admin_login')
 def handle_admin_login(data):
     if data.get('password') == ADMIN_PASSWORD:
         join_room('admin_room')
         emit('login_success')
+        broadcast_online_status()  # Send current online status to this admin
     else:
         emit('login_failed')
 
@@ -319,7 +345,7 @@ def handle_delete_expert(data):
     conn.close()
     emit('expert_updated', broadcast=True)
 
-# Keep old general admin login (password: admin)
+# Keep old general admin login
 @socketio.on('join_as_agent')
 def handle_agent_join(data):
     if data.get('password') == "admin":
@@ -332,7 +358,7 @@ def handle_agent_join(data):
         active_chats = [{'user_id': r[0], 'history': json.loads(r[1]), 'category': r[2]} for r in rows]
         emit('agent_init_data', active_chats)
 
-# --- REST OF YOUR ORIGINAL CODE (100% UNTOUCHED) ---
+# --- ORIGINAL CODE (100% UNTOUCHED FROM HERE) ---
 @socketio.on('register')
 def handle_register(data):
     user_id = data.get('user_id')
