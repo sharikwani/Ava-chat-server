@@ -111,7 +111,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 stripe.api_key = STRIPE_SECRET_KEY
 
 # --- DATABASE ---
-DB_FILE = "chat_data.db"
+DB_FILE = "/data/chat_data.db"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -515,3 +515,4 @@ def create_checkout_session():
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
+
