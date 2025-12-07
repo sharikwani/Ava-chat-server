@@ -364,9 +364,6 @@ def handle_register(data):
     user_id = data.get('user_id')
     join_room(user_id)
     chat_data = get_chat(user_id)
-if chat_data:
-    emit('current_history', {'history': chat_data['history'], 'paid': chat_data['paid']}, to=user_id)
-    chat_data = get_chat(user_id)
     if chat_data and chat_data['paid']:
         emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='agent_room')
         if chat_data.get('category'):
@@ -518,6 +515,7 @@ def create_checkout_session():
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, port=int(os.getenv("PORT", 5000)))
+
 
 
 
