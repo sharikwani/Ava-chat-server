@@ -7,7 +7,7 @@ import random
 import sqlite3
 import json
 import base64
-import requests  # ✅ added
+import requests  # ✅ Crisp API calls
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -44,22 +44,32 @@ def crisp_get_session_id_from_token(token_id: str):
     payload = r.json()
 
     data = payload.get("data")
-    # Crisp docs show data as array[object], but handle both list/dict safely
+    # Crisp docs sometimes return data as array[object]; handle both list/dict safely
     if isinstance(data, list) and data:
         return data[0].get("session_id")
     if isinstance(data, dict):
         return data.get("session_id")
     return None
 
-def crisp_send_message(session_id: str, content: str):
+def crisp_conversation_exists(session_id: str) -> bool:
+    """
+    Check if Crisp conversation exists.
+    HEAD /v1/website/{website_id}/conversation/{session_id}
+    """
+    url = f"{CRISP_API_BASE}/website/{CRISP_WEBSITE_ID}/conversation/{session_id}"
+    r = requests.head(url, auth=(CRISP_API_IDENTIFIER, CRISP_API_KEY), timeout=10)
+    return r.status_code == 200
+
+def crisp_send_message(session_id: str, content: str, msg_type: str = "note"):
     """
     Send a message into a Crisp conversation so agents see it in Inbox.
+    Use msg_type='note' to keep it INTERNAL (agents only).
     POST /v1/website/{website_id}/conversation/{session_id}/message
     """
     url = f"{CRISP_API_BASE}/website/{CRISP_WEBSITE_ID}/conversation/{session_id}/message"
     body = {
-        "type": "text",
-        "from": "operator",   # message appears as operator/system-side (visible to agents)
+        "type": msg_type,     # ✅ 'note' is internal for agents
+        "from": "operator",
         "origin": "chat",
         "content": content
     }
@@ -85,6 +95,27 @@ def format_transcript(history: list):
 
         lines.append(f"{tag}: {text}")
     return "\n".join(lines).strip()
+
+def chunk_text_by_lines(text: str, max_chars: int = 1800):
+    """
+    Chunk long transcripts into smaller notes (safer for API limits).
+    """
+    lines = text.splitlines()
+    chunks = []
+    buf = []
+    size = 0
+    for line in lines:
+        add_len = len(line) + 1
+        if size + add_len > max_chars and buf:
+            chunks.append("\n".join(buf))
+            buf = [line]
+            size = len(line)
+        else:
+            buf.append(line)
+            size += add_len
+    if buf:
+        chunks.append("\n".join(buf))
+    return chunks
 
 # --- FIREBASE SETUP ---
 firebase_db = None
@@ -338,7 +369,7 @@ def handle_admin_login(data):
     if data.get('password') == ADMIN_PASSWORD:
         join_room('admin_room')
         emit('login_success')
-        broadcast_online_status()  # Send current online status to this admin
+        broadcast_online_status()
     else:
         emit('login_failed')
 
@@ -423,11 +454,12 @@ def handle_agent_join(data):
         active_chats = [{'user_id': r[0], 'history': json.loads(r[1]), 'category': r[2]} for r in rows]
         emit('agent_init_data', active_chats)
 
-# ✅ NEW: CRISP SYNC EVENT (does NOT touch Ava logic)
+# ✅ CRISP SYNC EVENT (keeps Ava logic untouched)
 @socketio.on('crisp_sync')
 def handle_crisp_sync(data):
     """
     Called by frontend right after payment success + Crisp iframe loads with token_id.
+    Pushes Ava transcript as INTERNAL Crisp notes for agents.
     """
     if not crisp_enabled():
         emit("crisp_sync_result", {"ok": False, "error": "Crisp env vars missing"}, to=request.sid)
@@ -448,9 +480,9 @@ def handle_crisp_sync(data):
 
     def _task():
         try:
-            # Wait for Crisp to bind token → session (user must open chatbox with token_id)
+            # 1) Wait for Crisp to bind token → session
             session_id = None
-            for _ in range(16):  # ~8 seconds total
+            for _ in range(60):  # ~30 seconds total
                 session_id = crisp_get_session_id_from_token(token_id)
                 if session_id:
                     break
@@ -460,12 +492,29 @@ def handle_crisp_sync(data):
                 print(f"[CRISP] No session bound yet for token={token_id}")
                 return
 
-            msg = (
-                "Ava pre-payment transcript:\n\n"
-                + transcript
-            )
-            crisp_send_message(session_id, msg)
+            # 2) Wait for conversation to exist (chatbox loaded)
+            for _ in range(60):  # ~30 seconds total
+                if crisp_conversation_exists(session_id):
+                    break
+                eventlet.sleep(0.5)
+
+            if not crisp_conversation_exists(session_id):
+                print(f"[CRISP] Conversation not ready for session_id={session_id}")
+                return
+
+            # 3) Push transcript as INTERNAL notes (agents only)
+            header = "Ava pre-payment transcript (internal):"
+            chunks = chunk_text_by_lines(transcript, max_chars=1800)
+
+            crisp_send_message(session_id, header, msg_type="note")
+
+            total = len(chunks)
+            for idx, chunk in enumerate(chunks, start=1):
+                prefix = f"\n\n--- Part {idx}/{total} ---\n"
+                crisp_send_message(session_id, prefix + chunk, msg_type="note")
+
             print(f"[CRISP] Transcript pushed to session_id={session_id} for user_id={user_id}")
+
         except Exception as e:
             print(f"[CRISP] Sync error: {e}")
 
@@ -487,11 +536,11 @@ def handle_register(data):
 def handle_user_message(data):
     user_id = data.get('user_id')
     msg_text = data.get('message')
- 
+
     chat_data = get_chat(user_id)
     if chat_data is None:
         chat_data = {'history': [], 'paid': False, 'category': None}
- 
+
     chat_data['history'].append({'sender': 'user', 'text': msg_text})
     save_chat(user_id, chat_data['history'], chat_data['paid'], chat_data.get('category'))
     join_room(user_id)
@@ -505,7 +554,7 @@ def handle_user_message(data):
     emit('bot_typing', to=user_id)
     typing_delay = random.uniform(1.2, 3.8)
     eventlet.sleep(typing_delay)
- 
+
     try:
         gemini_history = []
         for msg in chat_data['history'][:-1]:
@@ -513,11 +562,11 @@ def handle_user_message(data):
                 gemini_history.append({'role': 'user', 'parts': [msg['text']]})
             elif msg['sender'] == 'bot':
                 gemini_history.append({'role': 'model', 'parts': [msg['text']]})
-     
+
         ai_chat = model.start_chat(history=gemini_history)
         response = ai_chat.send_message(msg_text)
         ai_text = response.text.strip()
-     
+
         trigger = False
         if ai_text.endswith("ACTION_TRIGGER_PAYMENT"):
             trigger = True
@@ -554,7 +603,7 @@ def handle_user_message(data):
         emit('bot_message', {'data': clean_text}, to=user_id)
         if trigger:
             emit('payment_trigger', to=user_id)
-         
+
     except Exception as e:
         print(f"AI Error: {e}")
         fallback = "Please allow me a moment to process your message."
@@ -609,7 +658,7 @@ def create_checkout_session():
         data = request.json
         uid = data.get('userId')
         base_url = request.headers.get('Origin', 'https://ava-assistant-api.onrender.com')
-     
+
         session = stripe.checkout.Session.create(
             line_items=[{
                 'price_data': {
