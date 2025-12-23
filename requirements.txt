@@ -8,5 +8,3 @@ stripe
 python-dotenv
 firebase-admin
 requests>=2.31.0
-
-
