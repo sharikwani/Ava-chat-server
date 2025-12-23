@@ -7,10 +7,7 @@ import random
 import sqlite3
 import json
 import base64
-
-# ✅ NEW (Crisp API)
-import requests
-from requests.auth import HTTPBasicAuth
+import requests  # ✅ added
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -27,11 +24,67 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 ADMIN_PASSWORD = "superadmin123"   # ← CHANGE THIS TO SOMETHING VERY STRONG
 
-# ✅ NEW (Crisp env vars)
-CRISP_WEBSITE_ID = os.getenv("CRISP_WEBSITE_ID")  # e.g. a63880ad-6d03-40aa-aeec-e45c722338e4
-CRISP_IDENTIFIER = os.getenv("CRISP_IDENTIFIER")  # Crisp REST API Identifier
-CRISP_KEY = os.getenv("CRISP_KEY")                # Crisp REST API Key
-CRISP_API_BASE = "https://api.crisp.chat"
+# ✅ CRISP CONFIG (env vars in Render)
+CRISP_API_IDENTIFIER = os.getenv("CRISP_API_IDENTIFIER")
+CRISP_API_KEY = os.getenv("CRISP_API_KEY")
+CRISP_WEBSITE_ID = os.getenv("CRISP_WEBSITE_ID")
+CRISP_API_BASE = "https://api.crisp.chat/v1"
+
+def crisp_enabled():
+    return all([CRISP_API_IDENTIFIER, CRISP_API_KEY, CRISP_WEBSITE_ID])
+
+def crisp_get_session_id_from_token(token_id: str):
+    """
+    Resolve a Crisp token_id to a session_id.
+    GET /v1/website/{website_id}/visitors/token/{token_id}
+    """
+    url = f"{CRISP_API_BASE}/website/{CRISP_WEBSITE_ID}/visitors/token/{token_id}"
+    r = requests.get(url, auth=(CRISP_API_IDENTIFIER, CRISP_API_KEY), timeout=10)
+    r.raise_for_status()
+    payload = r.json()
+
+    data = payload.get("data")
+    # Crisp docs show data as array[object], but handle both list/dict safely
+    if isinstance(data, list) and data:
+        return data[0].get("session_id")
+    if isinstance(data, dict):
+        return data.get("session_id")
+    return None
+
+def crisp_send_message(session_id: str, content: str):
+    """
+    Send a message into a Crisp conversation so agents see it in Inbox.
+    POST /v1/website/{website_id}/conversation/{session_id}/message
+    """
+    url = f"{CRISP_API_BASE}/website/{CRISP_WEBSITE_ID}/conversation/{session_id}/message"
+    body = {
+        "type": "text",
+        "from": "operator",   # message appears as operator/system-side (visible to agents)
+        "origin": "chat",
+        "content": content
+    }
+    r = requests.post(url, auth=(CRISP_API_IDENTIFIER, CRISP_API_KEY), json=body, timeout=10)
+    r.raise_for_status()
+
+def format_transcript(history: list):
+    lines = []
+    for m in history:
+        sender = m.get("sender", "")
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+
+        if sender == "user":
+            tag = "Customer"
+        elif sender == "bot":
+            tag = "Ava"
+        elif sender == "agent":
+            tag = "Expert"
+        else:
+            tag = sender.title() if sender else "Message"
+
+        lines.append(f"{tag}: {text}")
+    return "\n".join(lines).strip()
 
 # --- FIREBASE SETUP ---
 firebase_db = None
@@ -198,112 +251,6 @@ def sync_chat_to_firebase(user_id, history):
 @app.route('/')
 def index():
     return "Ava Professional Server - Running"
-
-# ✅✅✅ NEW: CRISP HANDOFF (NO CHANGES TO AVA LOGIC) ✅✅✅
-
-def _crisp_ready():
-    return bool(CRISP_WEBSITE_ID and CRISP_IDENTIFIER and CRISP_KEY)
-
-def _crisp_auth():
-    return HTTPBasicAuth(CRISP_IDENTIFIER, CRISP_KEY)
-
-def crisp_create_conversation():
-    """
-    POST /v1/website/{website_id}/conversation  -> returns session_id (Crisp conversation ID)
-    """
-    url = f"{CRISP_API_BASE}/v1/website/{CRISP_WEBSITE_ID}/conversation"
-    r = requests.post(url, auth=_crisp_auth(), timeout=12)
-    r.raise_for_status()
-    data = r.json()
-    # Expected: { error: false, data: { session_id: "..." } }
-    return data["data"]["session_id"]
-
-def crisp_send_text(session_id: str, sender_from: str, text: str):
-    """
-    POST /v1/website/{website_id}/conversation/{session_id}/message
-    from: user | operator
-    type: text
-    origin: chat
-    """
-    url = f"{CRISP_API_BASE}/v1/website/{CRISP_WEBSITE_ID}/conversation/{session_id}/message"
-    payload = {
-        "type": "text",
-        "from": sender_from,   # "user" or "operator"
-        "origin": "chat",
-        "content": text
-    }
-    r = requests.post(url, json=payload, auth=_crisp_auth(), timeout=12)
-    r.raise_for_status()
-    return True
-
-def _push_ava_transcript_to_crisp(user_id: str, session_id: str):
-    """
-    Reads SQLite chat history and posts it into Crisp conversation.
-    Visible to both customer & agent.
-    """
-    try:
-        chat_data = get_chat(user_id)
-        history = chat_data.get("history", []) if chat_data else []
-        category = chat_data.get("category") if chat_data else None
-
-        # 1) Intro note (operator) so agent understands context
-        intro = "✅ Payment verified on HelpByExperts. Here is the prior conversation with Ava (AI intake) before Crisp handoff."
-        if category:
-            intro += f"\n\nCategory detected: {category}"
-        crisp_send_text(session_id, "operator", intro)
-
-        # 2) Send each message in order
-        if not history:
-            crisp_send_text(session_id, "user", "User entered Crisp after payment (no prior Ava history found).")
-            return
-
-        for m in history:
-            sender = (m.get("sender") or "").lower()
-            txt = (m.get("text") or "").strip()
-            if not txt:
-                continue
-
-            if sender == "user":
-                crisp_send_text(session_id, "user", txt)
-            elif sender == "bot":
-                # Ava messages -> operator side (prefixed)
-                crisp_send_text(session_id, "operator", f"Ava: {txt}")
-            elif sender == "agent":
-                crisp_send_text(session_id, "operator", f"Agent: {txt}")
-            else:
-                crisp_send_text(session_id, "operator", f"{sender.title() or 'System'}: {txt}")
-
-        print(f"[CRISP] Transcript pushed for user_id={user_id} session_id={session_id}")
-
-    except Exception as e:
-        print(f"[CRISP] Transcript push failed: {e}")
-
-@app.route('/crisp-init', methods=['POST'])
-def crisp_init():
-    """
-    Called by the website after Stripe payment success.
-    - Creates a Crisp conversation session_id
-    - Pushes Ava transcript into that conversation (async)
-    - Returns session_id to the browser to open Crisp iframe with crisp_sid
-    """
-    if not _crisp_ready():
-        return jsonify({
-            "ok": False,
-            "error": "Crisp is not configured. Set CRISP_WEBSITE_ID, CRISP_IDENTIFIER, CRISP_KEY."
-        }), 500
-
-    data = request.json or {}
-    user_id = data.get("userId") or data.get("user_id")
-    if not user_id:
-        return jsonify({"ok": False, "error": "Missing userId"}), 400
-
-    try:
-        session_id = crisp_create_conversation()
-        # push transcript in background so UI loads fast
-        eventlet.tpool.execute(_push_ava_transcript_to_crisp, user_id, session_id)
-        return jsonify({"ok": True, "session_id": session_id})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 # --- PUBLIC EXPERT LIST ---
 @socketio.on('get_public_experts')
@@ -475,6 +422,55 @@ def handle_agent_join(data):
         conn.close()
         active_chats = [{'user_id': r[0], 'history': json.loads(r[1]), 'category': r[2]} for r in rows]
         emit('agent_init_data', active_chats)
+
+# ✅ NEW: CRISP SYNC EVENT (does NOT touch Ava logic)
+@socketio.on('crisp_sync')
+def handle_crisp_sync(data):
+    """
+    Called by frontend right after payment success + Crisp iframe loads with token_id.
+    """
+    if not crisp_enabled():
+        emit("crisp_sync_result", {"ok": False, "error": "Crisp env vars missing"}, to=request.sid)
+        return
+
+    user_id = (data or {}).get("user_id")
+    token_id = (data or {}).get("token_id") or user_id
+    if not user_id or not token_id:
+        emit("crisp_sync_result", {"ok": False, "error": "Missing user_id/token_id"}, to=request.sid)
+        return
+
+    chat_data = get_chat(user_id)
+    history = (chat_data or {}).get("history") or []
+    transcript = format_transcript(history)
+    if not transcript:
+        emit("crisp_sync_result", {"ok": False, "error": "No transcript"}, to=request.sid)
+        return
+
+    def _task():
+        try:
+            # Wait for Crisp to bind token → session (user must open chatbox with token_id)
+            session_id = None
+            for _ in range(16):  # ~8 seconds total
+                session_id = crisp_get_session_id_from_token(token_id)
+                if session_id:
+                    break
+                eventlet.sleep(0.5)
+
+            if not session_id:
+                print(f"[CRISP] No session bound yet for token={token_id}")
+                return
+
+            msg = (
+                "Ava pre-payment transcript:\n\n"
+                + transcript
+            )
+            crisp_send_message(session_id, msg)
+            print(f"[CRISP] Transcript pushed to session_id={session_id} for user_id={user_id}")
+        except Exception as e:
+            print(f"[CRISP] Sync error: {e}")
+
+    eventlet.spawn_n(_task)
+    emit("crisp_sync_result", {"ok": True}, to=request.sid)
 
 # --- ORIGINAL CODE (100% UNTOUCHED FROM HERE) ---
 @socketio.on('register')
