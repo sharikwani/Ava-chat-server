@@ -2,6 +2,9 @@
 import eventlet
 eventlet.monkey_patch()
 
+# ✅ FIX: import tpool properly (eventlet.tpool is a module, not an attribute on eventlet)
+from eventlet import tpool
+
 import os
 import random
 import sqlite3
@@ -86,7 +89,7 @@ AVA_AGENT_INSTRUCTIONS = (
     "ACTION_SHOW_APPOINTMENT_FORM"
 )
 
-def setup_model():
+def setup_model(system_instruction: str, temperature: float = 0.85):
     try:
         valid_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         valid_names = [m.name for m in valid_models]
@@ -100,44 +103,19 @@ def setup_model():
 
         return genai.GenerativeModel(
             chosen,
-            system_instruction=AVA_INSTRUCTIONS,
-            generation_config={"temperature": 0.85, "top_p": 0.95, "top_k": 64}
+            system_instruction=system_instruction,
+            generation_config={"temperature": temperature, "top_p": 0.95, "top_k": 64}
         )
     except Exception as e:
         print(f"Model setup error: {e}")
         return genai.GenerativeModel(
             "gemini-1.5-flash",
-            system_instruction=AVA_INSTRUCTIONS,
-            generation_config={"temperature": 0.85}
+            system_instruction=system_instruction,
+            generation_config={"temperature": temperature}
         )
 
-def setup_agent_model():
-    try:
-        valid_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        valid_names = [m.name for m in valid_models]
-        chosen = None
-        for name in valid_names:
-            if 'flash' in name.lower() and 'preview' not in name and 'lite' not in name:
-                chosen = name
-                break
-        if not chosen:
-            chosen = valid_names[0] if valid_names else "gemini-1.5-flash"
-
-        return genai.GenerativeModel(
-            chosen,
-            system_instruction=AVA_AGENT_INSTRUCTIONS,
-            generation_config={"temperature": 0.75, "top_p": 0.95, "top_k": 64}
-        )
-    except Exception as e:
-        print(f"Agent model setup error: {e}")
-        return genai.GenerativeModel(
-            "gemini-1.5-flash",
-            system_instruction=AVA_AGENT_INSTRUCTIONS,
-            generation_config={"temperature": 0.75}
-        )
-
-model = setup_model()
-agent_model = setup_agent_model()
+model = setup_model(AVA_INSTRUCTIONS, temperature=0.85)
+agent_model = setup_model(AVA_AGENT_INSTRUCTIONS, temperature=0.75)
 
 # -----------------------------
 # SERVER
@@ -225,7 +203,11 @@ def _save_to_firebase_task(user_id, history):
             print(f"Firebase Sync Error: {e}")
 
 def sync_chat_to_firebase(user_id, history):
-    eventlet.tpool.execute(_save_to_firebase_task, user_id, history)
+    # ✅ FIX: use tpool imported correctly
+    try:
+        tpool.execute(_save_to_firebase_task, user_id, history)
+    except Exception as e:
+        print("Firebase tpool execute error:", e)
 
 # -----------------------------
 # ROUTES
@@ -408,7 +390,6 @@ def handle_register(data):
     join_room(user_id)
     chat_data = get_chat(user_id)
     if chat_data and chat_data['paid']:
-        # keep these emits (doesn't break anything)
         emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='agent_room')
         if chat_data.get('category'):
             emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='experts_' + chat_data['category'])
@@ -453,7 +434,8 @@ def handle_user_message(data):
                 ai_text = "I’m on it. Tell me what device/system you’re using and what you see right now (any error message)."
 
             if show_form:
-                form_html = f"""
+                # ✅ FIX: DO NOT use f-string here (JS has braces). Use plain string + replace.
+                form_html = """
 <div style="margin-top:10px; padding:12px; border:1px solid #e2e8f0; border-radius:12px; background:#ffffff;">
   <div style="font-weight:800; margin-bottom:6px;">Schedule an Appointment</div>
   <div style="font-size:13px; color:#475569; margin-bottom:10px;">
@@ -489,24 +471,24 @@ def handle_user_message(data):
       var form = document.getElementById('ava-appointment-form');
       if(!form) return;
       var data = Object.fromEntries(new FormData(form).entries());
-      data.user_id = "{user_id}";
-      await fetch('/appointment', {{
+      data.user_id = "__USER_ID__";
+      await fetch('/appointment', {
         method:'POST',
-        headers:{{'Content-Type':'application/json'}},
+        headers:{'Content-Type':'application/json'},
         body: JSON.stringify(data)
-      }});
+      });
       btn.innerText = '✅ Request Sent';
       btn.disabled = true;
-    }}catch(e){{
+    }catch(e){
       btn.innerText = 'Try Again';
-    }}
+    }
   };
 })();
 </script>
 """
+                form_html = form_html.replace("__USER_ID__", str(user_id))
                 ai_text = ai_text + "\n\n" + form_html
 
-            # Save + emit as agent message
             chat_data['history'].append({'sender': 'agent', 'text': ai_text})
             save_chat(user_id, chat_data['history'], chat_data['paid'], chat_data.get('category'))
             emit('bot_message', {'data': ai_text, 'is_agent': True}, to=user_id)
@@ -543,7 +525,6 @@ def handle_user_message(data):
             trigger = True
             clean_text = ai_text[:-len("ACTION_TRIGGER_PAYMENT")].strip()
 
-            # classify category once
             if not chat_data.get('category'):
                 try:
                     full_convo = "\n".join([f"{m['sender'].title()}: {m['text']}" for m in chat_data['history']])
@@ -568,7 +549,6 @@ def handle_user_message(data):
                 except Exception as e:
                     print("Classification failed:", e)
                     chat_data['category'] = "other"
-
         else:
             clean_text = ai_text
 
@@ -631,8 +611,8 @@ def handle_payment_confirm(data):
             socketio.emit('agent_connected', {'name': 'Ava', 'photo': ''}, to=user_id)
 
             first_msg = (
-                "I’m here with you now. ✅ "
-                "To start, tell me what you’ve tried so far and what happened on the last attempt."
+                "Agent joined ✅ I’m Ava and I’ll help you solve this now. "
+                "Tell me what you tried so far and what happened on the last attempt."
             )
             socketio.emit('bot_message', {'data': first_msg, 'is_agent': True}, to=user_id)
 
