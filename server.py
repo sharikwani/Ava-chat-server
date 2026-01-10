@@ -7,7 +7,7 @@ import random
 import sqlite3
 import json
 import base64
-import requests
+import requests  # kept (ok even if unused)
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -29,73 +29,8 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 # IMPORTANT: set a strong admin password
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "superadmin123")
 
-# CRISP ENV VARS (Render)
-CRISP_API_IDENTIFIER = os.getenv("CRISP_API_IDENTIFIER")
-CRISP_API_KEY = os.getenv("CRISP_API_KEY")
-CRISP_WEBSITE_ID = os.getenv("CRISP_WEBSITE_ID")
-CRISP_API_BASE = "https://api.crisp.chat/v1"
-
 # IMPORTANT: your website domain (Stripe return URL)
 PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "https://www.helpbyexperts.com")
-
-def crisp_enabled():
-    return all([CRISP_API_IDENTIFIER, CRISP_API_KEY, CRISP_WEBSITE_ID])
-
-def crisp_get_session_id_from_token(token_id: str):
-    """
-    Resolve Crisp token_id -> session_id
-    GET /v1/website/{website_id}/visitors/token/{token_id}
-    """
-    url = f"{CRISP_API_BASE}/website/{CRISP_WEBSITE_ID}/visitors/token/{token_id}"
-    r = requests.get(url, auth=(CRISP_API_IDENTIFIER, CRISP_API_KEY), timeout=10)
-    r.raise_for_status()
-    payload = r.json()
-
-    data = payload.get("data")
-    # Crisp can return list or dict depending on endpoint behavior / account
-    if isinstance(data, list) and data:
-        return data[0].get("session_id")
-    if isinstance(data, dict):
-        return data.get("session_id")
-    return None
-
-def crisp_send_message(session_id: str, content: str):
-    """
-    Push a message into Crisp conversation so agents see it in Inbox.
-    POST /v1/website/{website_id}/conversation/{session_id}/message
-    """
-    url = f"{CRISP_API_BASE}/website/{CRISP_WEBSITE_ID}/conversation/{session_id}/message"
-    body = {
-        "type": "text",
-        "from": "operator",     # shows as operator-side in inbox
-        "origin": "chat",
-        "content": content
-    }
-    r = requests.post(url, auth=(CRISP_API_IDENTIFIER, CRISP_API_KEY), json=body, timeout=10)
-    r.raise_for_status()
-
-def format_transcript(history: list):
-    """
-    history items: {'sender': 'user'|'bot'|'agent', 'text': '...'}
-    """
-    lines = []
-    for m in history:
-        sender = (m.get("sender") or "").strip()
-        text = (m.get("text") or "").strip()
-        if not text:
-            continue
-
-        if sender == "user":
-            tag = "Customer"
-        elif sender == "bot":
-            tag = "Ava"
-        elif sender == "agent":
-            tag = "Expert"
-        else:
-            tag = sender.title() if sender else "Message"
-
-        lines.append(f"{tag}: {text}")
-    return "\n".join(lines).strip()
 
 # -----------------------------
 # FIREBASE (OPTIONAL)
@@ -119,6 +54,7 @@ except Exception as e:
 # -----------------------------
 genai.configure(api_key=GOOGLE_API_KEY)
 
+# PRE-PAYMENT (intake) instructions (UNCHANGED)
 AVA_INSTRUCTIONS = (
     "You are Ava, a highly professional, calm, confident, and trustworthy intake specialist for HelpByExperts — "
     "a premium service that connects users instantly to certified human experts in ANY field.\n\n"
@@ -136,6 +72,18 @@ AVA_INSTRUCTIONS = (
     "ACTION_TRIGGER_PAYMENT\n\n"
     "When ready to trigger payment, end your message with exactly:\n"
     "ACTION_TRIGGER_PAYMENT"
+)
+
+# POST-PAYMENT (agent) instructions (NEW)
+AVA_AGENT_INSTRUCTIONS = (
+    "You are Ava, now acting as the user's paid specialist (expert agent) for HelpByExperts.\n\n"
+    "Rules:\n"
+    "- You CAN provide solutions now (step-by-step).\n"
+    "- Ask concise clarifying questions when needed.\n"
+    "- Keep the conversation focused until the user confirms the issue is solved.\n"
+    "- If you cannot solve confidently in chat, you MUST offer an appointment.\n\n"
+    "When you need an appointment, end your message with exactly:\n"
+    "ACTION_SHOW_APPOINTMENT_FORM"
 )
 
 def setup_model():
@@ -163,7 +111,33 @@ def setup_model():
             generation_config={"temperature": 0.85}
         )
 
+def setup_agent_model():
+    try:
+        valid_models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        valid_names = [m.name for m in valid_models]
+        chosen = None
+        for name in valid_names:
+            if 'flash' in name.lower() and 'preview' not in name and 'lite' not in name:
+                chosen = name
+                break
+        if not chosen:
+            chosen = valid_names[0] if valid_names else "gemini-1.5-flash"
+
+        return genai.GenerativeModel(
+            chosen,
+            system_instruction=AVA_AGENT_INSTRUCTIONS,
+            generation_config={"temperature": 0.75, "top_p": 0.95, "top_k": 64}
+        )
+    except Exception as e:
+        print(f"Agent model setup error: {e}")
+        return genai.GenerativeModel(
+            "gemini-1.5-flash",
+            system_instruction=AVA_AGENT_INSTRUCTIONS,
+            generation_config={"temperature": 0.75}
+        )
+
 model = setup_model()
+agent_model = setup_agent_model()
 
 # -----------------------------
 # SERVER
@@ -259,6 +233,16 @@ def sync_chat_to_firebase(user_id, history):
 @app.route('/')
 def index():
     return "Ava Professional Server - Running"
+
+# ✅ Appointment capture endpoint (used by the in-chat form)
+@app.route('/appointment', methods=['POST'])
+def appointment():
+    try:
+        data = request.json or {}
+        print("APPOINTMENT REQUEST:", data)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # -----------------------------
 # SOCKET EVENTS
@@ -416,53 +400,6 @@ def handle_delete_expert(data):
     emit('expert_updated', broadcast=True)
 
 # ------------------------------------
-# ✅ CRISP SYNC: push Ava transcript into Crisp
-# called by frontend after Crisp iframe loads
-# ------------------------------------
-@socketio.on('crisp_sync')
-def handle_crisp_sync(data):
-    if not crisp_enabled():
-        emit("crisp_sync_result", {"ok": False, "error": "Crisp env vars missing"}, to=request.sid)
-        return
-
-    user_id = (data or {}).get("user_id")
-    token_id = (data or {}).get("token_id") or user_id
-    if not user_id or not token_id:
-        emit("crisp_sync_result", {"ok": False, "error": "Missing user_id/token_id"}, to=request.sid)
-        return
-
-    chat_data = get_chat(user_id)
-    history = (chat_data or {}).get("history") or []
-    transcript = format_transcript(history)
-    if not transcript:
-        emit("crisp_sync_result", {"ok": False, "error": "No transcript"}, to=request.sid)
-        return
-
-    def _task():
-        try:
-            # Crisp binds token -> session only after chat loads
-            session_id = None
-            for _ in range(20):  # up to ~10 seconds
-                session_id = crisp_get_session_id_from_token(token_id)
-                if session_id:
-                    break
-                eventlet.sleep(0.5)
-
-            if not session_id:
-                print(f"[CRISP] No session bound yet for token={token_id}")
-                return
-
-            msg = "Ava pre-payment transcript:\n\n" + transcript
-            crisp_send_message(session_id, msg)
-            print(f"[CRISP] Transcript pushed. session_id={session_id}, token={token_id}")
-
-        except Exception as e:
-            print(f"[CRISP] Sync error: {e}")
-
-    eventlet.spawn_n(_task)
-    emit("crisp_sync_result", {"ok": True}, to=request.sid)
-
-# ------------------------------------
 # ORIGINAL CHAT FLOW (kept compatible)
 # ------------------------------------
 @socketio.on('register')
@@ -471,6 +408,7 @@ def handle_register(data):
     join_room(user_id)
     chat_data = get_chat(user_id)
     if chat_data and chat_data['paid']:
+        # keep these emits (doesn't break anything)
         emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='agent_room')
         if chat_data.get('category'):
             emit('user_status_change', {'user_id': user_id, 'status': 'online'}, to='experts_' + chat_data['category'])
@@ -485,12 +423,106 @@ def handle_user_message(data):
     save_chat(user_id, chat_data['history'], chat_data['paid'], chat_data.get('category'))
     join_room(user_id)
 
+    # ✅ POST-PAYMENT: Ava continues as agent in SAME window
     if chat_data['paid']:
-        emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='agent_room')
-        if chat_data.get('category'):
-            emit('new_msg_for_agent', {'user_id': user_id, 'text': msg_text}, to='experts_' + chat_data['category'])
+        emit('bot_typing', to=user_id)
+        eventlet.sleep(random.uniform(1.0, 2.2))
+
+        try:
+            gemini_history = []
+            for m in chat_data['history'][:-1]:
+                sender = (m.get('sender') or '').strip()
+                text = (m.get('text') or '').strip()
+                if not text:
+                    continue
+                if sender == 'user':
+                    gemini_history.append({'role': 'user', 'parts': [text]})
+                elif sender in ('bot', 'agent'):
+                    gemini_history.append({'role': 'model', 'parts': [text]})
+
+            ai_chat = agent_model.start_chat(history=gemini_history)
+            resp = ai_chat.send_message(msg_text)
+            ai_text = (resp.text or "").strip()
+
+            show_form = False
+            if ai_text.endswith("ACTION_SHOW_APPOINTMENT_FORM"):
+                show_form = True
+                ai_text = ai_text[:-len("ACTION_SHOW_APPOINTMENT_FORM")].strip()
+
+            if not ai_text:
+                ai_text = "I’m on it. Tell me what device/system you’re using and what you see right now (any error message)."
+
+            if show_form:
+                form_html = f"""
+<div style="margin-top:10px; padding:12px; border:1px solid #e2e8f0; border-radius:12px; background:#ffffff;">
+  <div style="font-weight:800; margin-bottom:6px;">Schedule an Appointment</div>
+  <div style="font-size:13px; color:#475569; margin-bottom:10px;">
+    If we can’t fully resolve this in chat, fill this out and we’ll contact you.
+  </div>
+
+  <form id="ava-appointment-form">
+    <input name="name" placeholder="Your Name" required
+      style="width:100%; padding:10px; margin-bottom:8px; border:1px solid #cbd5e1; border-radius:10px;" />
+    <input name="phone" placeholder="Phone Number" required
+      style="width:100%; padding:10px; margin-bottom:8px; border:1px solid #cbd5e1; border-radius:10px;" />
+    <input name="email" placeholder="Email" required
+      style="width:100%; padding:10px; margin-bottom:8px; border:1px solid #cbd5e1; border-radius:10px;" />
+    <textarea name="notes" placeholder="Extra details (optional)"
+      style="width:100%; padding:10px; margin-bottom:10px; border:1px solid #cbd5e1; border-radius:10px;"></textarea>
+
+    <button type="button" id="ava-appointment-submit"
+      style="width:100%; padding:12px; background:#2563eb; color:white; border:none; border-radius:10px; font-weight:800; cursor:pointer;">
+      Request Call Back
+    </button>
+  </form>
+
+  <div style="margin-top:8px; font-size:12px; color:#64748b;">
+    By submitting, you consent to be contacted about your request.
+  </div>
+</div>
+<script>
+(function(){
+  var btn = document.getElementById('ava-appointment-submit');
+  if(!btn) return;
+  btn.onclick = async function(){
+    try{
+      var form = document.getElementById('ava-appointment-form');
+      if(!form) return;
+      var data = Object.fromEntries(new FormData(form).entries());
+      data.user_id = "{user_id}";
+      await fetch('/appointment', {{
+        method:'POST',
+        headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify(data)
+      }});
+      btn.innerText = '✅ Request Sent';
+      btn.disabled = true;
+    }}catch(e){{
+      btn.innerText = 'Try Again';
+    }}
+  };
+})();
+</script>
+"""
+                ai_text = ai_text + "\n\n" + form_html
+
+            # Save + emit as agent message
+            chat_data['history'].append({'sender': 'agent', 'text': ai_text})
+            save_chat(user_id, chat_data['history'], chat_data['paid'], chat_data.get('category'))
+            emit('bot_message', {'data': ai_text, 'is_agent': True}, to=user_id)
+
+        except Exception as e:
+            print("Paid agent AI Error:", e)
+            fallback = "I’m here. Tell me exactly what you’re seeing right now (any error text), and what device/system you’re on."
+            chat_data['history'].append({'sender': 'agent', 'text': fallback})
+            save_chat(user_id, chat_data['history'], chat_data['paid'], chat_data.get('category'))
+            emit('bot_message', {'data': fallback, 'is_agent': True}, to=user_id)
+
         return
 
+    # -----------------------
+    # PRE-PAYMENT (unchanged)
+    # -----------------------
     emit('bot_typing', to=user_id)
     eventlet.sleep(random.uniform(1.2, 3.8))
 
@@ -591,6 +623,26 @@ def handle_payment_confirm(data):
         emit('new_paid_user', payload, to='experts_' + chat_data['category'])
 
     sync_chat_to_firebase(user_id, chat_data['history'])
+
+    # ✅ After 10 seconds, Ava "joins" and starts helping inside same chat window
+    def _ava_join_task():
+        try:
+            eventlet.sleep(10)
+            socketio.emit('agent_connected', {'name': 'Ava', 'photo': ''}, to=user_id)
+
+            first_msg = (
+                "I’m here with you now. ✅ "
+                "To start, tell me what you’ve tried so far and what happened on the last attempt."
+            )
+            socketio.emit('bot_message', {'data': first_msg, 'is_agent': True}, to=user_id)
+
+            cd = get_chat(user_id)
+            cd['history'].append({'sender': 'agent', 'text': first_msg})
+            save_chat(user_id, cd['history'], cd['paid'], cd.get('category'))
+        except Exception as e:
+            print("Ava join task error:", e)
+
+    eventlet.spawn_n(_ava_join_task)
 
 # -----------------------------
 # STRIPE CHECKOUT
